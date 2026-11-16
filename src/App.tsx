@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CompanionStage, type SoraPromptMode } from './components/CompanionStage';
+import { CompanionStage } from './components/CompanionStage';
 import { CoStudyRoomPanel, fallbackCopyText } from './components/CoStudyRoomPanel';
 import { HistoryDashboardView } from './components/HistoryDashboardView';
 import { ParticleBackground } from './components/ParticleBackground';
@@ -28,10 +28,19 @@ import {
   createNewProfile,
   createStudyCard,
   DEFAULT_TIMER_SETTINGS,
+  fetchCurrentAccount,
   loadActiveProfileId,
+  loadAuthToken,
   loadProfiles,
+  loadTimerSnapshot,
+  loginAccount,
+  normalizeStudyCards,
+  registerAccount,
   saveActiveProfileId,
+  saveAuthToken,
   saveProfiles,
+  saveTimerSnapshot,
+  syncAccountCards,
 } from './utils/profileStorage';
 import { playCueSound } from './utils/soundCues';
 
@@ -41,9 +50,9 @@ function makeId(prefix = 'id'): string {
 
 function buildSessionOpeningQuestion(name: string, cardTitle: string, hasTasks: boolean): string {
   if (hasTasks) {
-    return `Hey ${name}, welcome back to ${cardTitle}. What's our focus first, and want me to check in every ${DEFAULT_TIMER_SETTINGS.checkInMinutes} mins or a different interval?`;
+    return `Hey ${name}, welcome back to ${cardTitle}. Tap Talk Live or start your timer whenever you're ready.`;
   }
-  return `Hey ${name}! What do you want to work on in ${cardTitle} today? Also, do you want me to check in on you—and after how many minutes?`;
+  return `Hey ${name}! What are we working on in ${cardTitle}? Tap Talk Live to tell me & set check-ins, or add tasks on the right.`;
 }
 
 function parseInitialRoomInvite(): { roomId: string; title: string } | null {
@@ -101,8 +110,10 @@ export default function App() {
     if (savedId && loaded.some((p) => p.id === savedId)) return savedId;
     return loaded[0].id;
   });
+  const [authToken, setAuthToken] = useState<string | null>(() => loadAuthToken());
+  const [isSyncingAccount, setIsSyncingAccount] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState<boolean>(
-    () => loadProfiles().length === 0
+    () => loadProfiles().length === 0 && !loadAuthToken()
   );
 
   const activeProfile =
@@ -149,20 +160,22 @@ export default function App() {
   const [companionCaption, setCompanionCaption] = useState<string>(
     `Hey ${activeProfile?.name ?? 'there'} — ready whenever you open a study card.`
   );
-  const [soraPromptMode, setSoraPromptMode] = useState<SoraPromptMode>('idle');
-  const [isSendingReply, setIsSendingReply] = useState(false);
   const [isSimulatingSpeech, setIsSimulatingSpeech] = useState(false);
   const speechSimTimerRef = useRef<number | null>(null);
 
-  // Sprint & Break Timer State
+  // Wall-clock anchored Sprint & Break Timer State
   const [sprintPhase, setSprintPhase] = useState<SprintPhase>('work');
   const [isFocusRunning, setIsFocusRunning] = useState(false);
   const [phaseRemainingSeconds, setPhaseRemainingSeconds] = useState(
     () => DEFAULT_TIMER_SETTINGS.workMinutes * 60
   );
   const [elapsedSessionSeconds, setElapsedSessionSeconds] = useState(0);
+  const phaseEndAtRef = useRef<number | null>(null);
+  const elapsedBaseRef = useRef<number>(0);
+  const runningSinceRef = useRef<number | null>(null);
+  const reminderFiredRef = useRef<boolean>(false);
 
-  // User-Demand Built-In Automatic Alert Timer (wall-clock anchored so edits never reset it)
+  // Wall-clock anchored Automatic Check-In Timer (survives app tab & browser tab switches)
   const [alertEnabled, setAlertEnabled] = useState(true);
   const [secondsUntilAlert, setSecondsUntilAlert] = useState(
     () => DEFAULT_TIMER_SETTINGS.checkInMinutes * 60
@@ -183,7 +196,7 @@ export default function App() {
   const liveAssistantBufRef = useRef('');
   const sessionStartTimeRef = useRef<number>(Date.now());
 
-  // Always-fresh refs for timers/callbacks so check-ins never read stale state
+  // Always-fresh refs for timers/callbacks so check-ins & visibility resync never read stale state
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
   const activeCardRef = useRef(activeCard);
@@ -198,6 +211,16 @@ export default function App() {
   profileNameRef.current = profileName;
   const isFocusRunningRef = useRef(isFocusRunning);
   isFocusRunningRef.current = isFocusRunning;
+  const alertEnabledRef = useRef(alertEnabled);
+  alertEnabledRef.current = alertEnabled;
+  const sprintPhaseRef = useRef(sprintPhase);
+  sprintPhaseRef.current = sprintPhase;
+  const phaseRemainingRef = useRef(phaseRemainingSeconds);
+  phaseRemainingRef.current = phaseRemainingSeconds;
+
+  const suppressNextCloudPushRef = useRef(false);
+  const hasUnsyncedCloudRef = useRef(false);
+  const lastCloudUpdatedAtRef = useRef<number>(0);
 
   const triggerSimulatedSpeech = useCallback((durationMs = 2400) => {
     if (speechSimTimerRef.current) {
@@ -216,6 +239,95 @@ export default function App() {
   useEffect(() => {
     saveActiveProfileId(activeProfileId);
   }, [activeProfileId]);
+
+  useEffect(() => {
+    saveAuthToken(authToken);
+  }, [authToken]);
+
+  // Restore active cloud account on launch & refresh when switching back between browsers
+  const pullCloudAccount = useCallback(
+    async (token: string, forceReplace = false) => {
+      const account = await fetchCurrentAccount(token);
+      if (!account) {
+        if (forceReplace) {
+          setAuthToken(null);
+          setIsProfileModalOpen(true);
+        }
+        return;
+      }
+
+      if (!forceReplace && hasUnsyncedCloudRef.current) return;
+      if (!forceReplace && account.updatedAt <= lastCloudUpdatedAtRef.current) return;
+
+      lastCloudUpdatedAtRef.current = account.updatedAt;
+      suppressNextCloudPushRef.current = true;
+
+      setProfiles((prev) => {
+        const localGuests = prev.filter((p) => !p.isCloudAccount && p.id !== account.id);
+        const cloudProfile: UserProfile = {
+          id: account.id,
+          name: account.username,
+          createdAt: account.createdAt,
+          studyCards: account.studyCards,
+          isCloudAccount: true,
+        };
+        return [cloudProfile, ...localGuests];
+      });
+      setActiveProfileId(account.id);
+      if (forceReplace) {
+        setIsProfileModalOpen(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!authToken) return;
+    void pullCloudAccount(authToken, true);
+  }, [authToken, pullCloudAccount]);
+
+  // Debounced auto-sync of cloud account study cards across browsers
+  const cloudSyncPayload = activeProfile?.isCloudAccount ? activeProfile.studyCards : null;
+  useEffect(() => {
+    if (!authToken || !cloudSyncPayload) return;
+    if (suppressNextCloudPushRef.current) {
+      suppressNextCloudPushRef.current = false;
+      return;
+    }
+
+    hasUnsyncedCloudRef.current = true;
+    const timer = window.setTimeout(async () => {
+      setIsSyncingAccount(true);
+      const ok = await syncAccountCards(authToken, cloudSyncPayload);
+      if (ok) {
+        hasUnsyncedCloudRef.current = false;
+        lastCloudUpdatedAtRef.current = Date.now();
+      }
+      setIsSyncingAccount(false);
+    }, 450);
+
+    return () => window.clearTimeout(timer);
+  }, [authToken, cloudSyncPayload]);
+
+  // Flush pending cloud sync on pagehide & pull updates when returning to browser window
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (authToken && activeProfile?.isCloudAccount && hasUnsyncedCloudRef.current) {
+        void syncAccountCards(authToken, activeProfile.studyCards, true);
+      }
+    };
+    const handleFocusRefresh = () => {
+      if (authToken && !document.hidden) {
+        void pullCloudAccount(authToken, false);
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('focus', handleFocusRefresh);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('focus', handleFocusRefresh);
+    };
+  }, [activeProfile, authToken, pullCloudAccount]);
 
   useEffect(() => {
     fetch('/api/public-config')
@@ -252,6 +364,46 @@ export default function App() {
     [activeCardId, updateActiveProfile]
   );
 
+  const persistActiveTimerSnapshot = useCallback(
+    (overrides?: {
+      cardId?: string | null;
+      sprintPhase?: SprintPhase;
+      isFocusRunning?: boolean;
+      phaseEndAt?: number | null;
+      pausedRemainingSeconds?: number;
+      elapsedSessionSeconds?: number;
+      alertEnabled?: boolean;
+      nextAlertAt?: number | null;
+      checkInMinutes?: number;
+    }) => {
+      const targetCardId =
+        overrides?.cardId !== undefined ? overrides.cardId : activeCardRef.current?.id ?? null;
+      if (!activeProfileId || !targetCardId) {
+        saveTimerSnapshot(null);
+        return;
+      }
+      saveTimerSnapshot({
+        profileId: activeProfileId,
+        cardId: targetCardId,
+        sprintPhase: overrides?.sprintPhase ?? sprintPhaseRef.current,
+        isFocusRunning: overrides?.isFocusRunning ?? isFocusRunningRef.current,
+        phaseEndAt:
+          overrides?.phaseEndAt !== undefined ? overrides.phaseEndAt : phaseEndAtRef.current,
+        pausedRemainingSeconds:
+          overrides?.pausedRemainingSeconds ?? phaseRemainingRef.current,
+        elapsedSessionSeconds:
+          overrides?.elapsedSessionSeconds ?? elapsedSecondsRef.current,
+        alertEnabled: overrides?.alertEnabled ?? alertEnabledRef.current,
+        nextAlertAt:
+          overrides?.nextAlertAt !== undefined ? overrides.nextAlertAt : nextAlertAtRef.current,
+        checkInMinutes:
+          overrides?.checkInMinutes ?? timerSettingsRef.current.checkInMinutes,
+        updatedAt: Date.now(),
+      });
+    },
+    [activeProfileId]
+  );
+
   const applyCheckInPreference = useCallback(
     (enabled: boolean, intervalMinutes?: number) => {
       const clampedMins =
@@ -267,44 +419,130 @@ export default function App() {
         }));
       }
 
-      if (enabled) {
-        nextAlertAtRef.current = Date.now() + clampedMins * 60_000;
-        setSecondsUntilAlert(clampedMins * 60);
-      } else {
-        nextAlertAtRef.current = null;
-        setSecondsUntilAlert(clampedMins * 60);
-      }
+      const nextTarget = enabled ? Date.now() + clampedMins * 60_000 : null;
+      nextAlertAtRef.current = nextTarget;
+      setSecondsUntilAlert(clampedMins * 60);
+      persistActiveTimerSnapshot({
+        alertEnabled: enabled,
+        nextAlertAt: nextTarget,
+        checkInMinutes: clampedMins,
+      });
     },
-    [updateActiveCard]
+    [persistActiveTimerSnapshot, updateActiveCard]
   );
 
   const openStudyCard = useCallback(
     (card: StudySessionCard) => {
+      // If returning to the currently active card (e.g. from Sessions or History), keep running timers intact!
+      if (activeCardRef.current?.id === card.id) {
+        setActiveView('workspace');
+        return;
+      }
+
       setActiveCardId(card.id);
       setActiveView('workspace');
       setPanelMode('focus');
-      setSprintPhase('work');
-      setIsFocusRunning(false);
-      setPhaseRemainingSeconds(card.timerSettings.workMinutes * 60);
-      setElapsedSessionSeconds(0);
       setActiveTaskId(card.tasks.find((t) => !t.completed)?.id ?? null);
       setActiveAlertBanner(null);
-      setPose('speaking');
-      sessionStartTimeRef.current = Date.now();
 
-      nextAlertAtRef.current = alertEnabled
-        ? Date.now() + card.timerSettings.checkInMinutes * 60_000
-        : null;
-      setSecondsUntilAlert(card.timerSettings.checkInMinutes * 60);
+      // Restore unexpired running timer snapshot for this card if present
+      const snap = loadTimerSnapshot();
+      if (snap && snap.cardId === card.id && snap.profileId === activeProfileId) {
+        const now = Date.now();
+        const restoredPhase = snap.sprintPhase;
+        let restoredRunning = snap.isFocusRunning;
+        let restoredRem = snap.pausedRemainingSeconds;
+        let restoredPhaseEndAt = snap.phaseEndAt;
 
-      const opening = buildSessionOpeningQuestion(
-        profileNameRef.current,
-        card.title,
-        card.tasks.length > 0
-      );
-      setCompanionCaption(opening);
-      setSoraPromptMode('onboarding');
-      triggerSimulatedSpeech(2400);
+        if (restoredRunning && restoredPhaseEndAt) {
+          const left = Math.ceil((restoredPhaseEndAt - now) / 1000);
+          if (left > 0) {
+            restoredRem = left;
+          } else {
+            restoredRunning = false;
+            restoredPhaseEndAt = null;
+            restoredRem =
+              (restoredPhase === 'work'
+                ? card.timerSettings.workMinutes
+                : card.timerSettings.breakMinutes) * 60;
+          }
+        }
+
+        const restoredAlertEnabled = snap.alertEnabled;
+        const intervalMs = Math.max(1, card.timerSettings.checkInMinutes) * 60_000;
+        let restoredNextAlert = snap.nextAlertAt;
+        if (restoredAlertEnabled) {
+          if (!restoredNextAlert || restoredNextAlert <= now) {
+            restoredNextAlert = now + intervalMs;
+          }
+        } else {
+          restoredNextAlert = null;
+        }
+
+        setSprintPhase(restoredPhase);
+        setIsFocusRunning(restoredRunning);
+        setPhaseRemainingSeconds(restoredRem);
+        phaseEndAtRef.current = restoredPhaseEndAt;
+        const addedWhileRunning =
+          restoredRunning && snap.updatedAt
+            ? Math.max(0, Math.floor((now - snap.updatedAt) / 1000))
+            : 0;
+        const nextElapsed = snap.elapsedSessionSeconds + addedWhileRunning;
+        setElapsedSessionSeconds(nextElapsed);
+        elapsedBaseRef.current = nextElapsed;
+        runningSinceRef.current = restoredRunning ? now : null;
+        reminderFiredRef.current = false;
+
+        setAlertEnabled(restoredAlertEnabled);
+        nextAlertAtRef.current = restoredNextAlert;
+        setSecondsUntilAlert(
+          restoredNextAlert
+            ? Math.max(1, Math.ceil((restoredNextAlert - now) / 1000))
+            : card.timerSettings.checkInMinutes * 60
+        );
+        setPose(restoredRunning ? (restoredPhase === 'break' ? 'coffee' : 'typing') : 'coffee');
+        setCompanionCaption(
+          restoredRunning
+            ? `Welcome back to ${card.title} — your timer kept running.`
+            : buildSessionOpeningQuestion(profileNameRef.current, card.title, card.tasks.length > 0)
+        );
+      } else {
+        setSprintPhase('work');
+        setIsFocusRunning(false);
+        phaseEndAtRef.current = null;
+        runningSinceRef.current = null;
+        elapsedBaseRef.current = 0;
+        reminderFiredRef.current = false;
+        setPhaseRemainingSeconds(card.timerSettings.workMinutes * 60);
+        setElapsedSessionSeconds(0);
+        setPose('speaking');
+        sessionStartTimeRef.current = Date.now();
+
+        const nextAlert = alertEnabledRef.current
+          ? Date.now() + card.timerSettings.checkInMinutes * 60_000
+          : null;
+        nextAlertAtRef.current = nextAlert;
+        setSecondsUntilAlert(card.timerSettings.checkInMinutes * 60);
+
+        const opening = buildSessionOpeningQuestion(
+          profileNameRef.current,
+          card.title,
+          card.tasks.length > 0
+        );
+        setCompanionCaption(opening);
+        triggerSimulatedSpeech(2400);
+        persistActiveTimerSnapshot({
+          cardId: card.id,
+          sprintPhase: 'work',
+          isFocusRunning: false,
+          phaseEndAt: null,
+          pausedRemainingSeconds: card.timerSettings.workMinutes * 60,
+          elapsedSessionSeconds: 0,
+          alertEnabled: alertEnabledRef.current,
+          nextAlertAt: nextAlert,
+          checkInMinutes: card.timerSettings.checkInMinutes,
+        });
+      }
 
       updateActiveProfile((profile) => ({
         ...profile,
@@ -313,7 +551,7 @@ export default function App() {
         ),
       }));
     },
-    [alertEnabled, triggerSimulatedSpeech, updateActiveProfile]
+    [activeProfileId, persistActiveTimerSnapshot, triggerSimulatedSpeech, updateActiveProfile]
   );
 
   // Auto-open a private Study Card when arriving via a friend's shared ?room=... invite link
@@ -343,12 +581,15 @@ export default function App() {
     setPanelMode('focus');
     setSprintPhase('work');
     setIsFocusRunning(false);
+    phaseEndAtRef.current = null;
+    runningSinceRef.current = null;
+    elapsedBaseRef.current = 0;
     setPhaseRemainingSeconds(newCard.timerSettings.workMinutes * 60);
-    nextAlertAtRef.current = Date.now() + newCard.timerSettings.checkInMinutes * 60_000;
+    const nextAlert = Date.now() + newCard.timerSettings.checkInMinutes * 60_000;
+    nextAlertAtRef.current = nextAlert;
     setSecondsUntilAlert(newCard.timerSettings.checkInMinutes * 60);
     const msg = buildSessionOpeningQuestion(activeProfile.name, newCard.title, false);
     setCompanionCaption(msg);
-    setSoraPromptMode('onboarding');
     triggerSimulatedSpeech(2400);
   }, [activeProfile, openStudyCard, triggerSimulatedSpeech]);
 
@@ -372,16 +613,86 @@ export default function App() {
     sendPresence(panelMode, isFocusRunning);
   }, [isFocusRunning, panelMode, roomId, sendPresence]);
 
-  const handleCreateProfile = (name: string) => {
-    const profile = createNewProfile(name);
-    setProfiles((prev) => [...prev, profile]);
-    setActiveProfileId(profile.id);
+  const handleRegisterCloudAccount = async (username: string, password: string) => {
+    const starterCards =
+      activeProfile && !activeProfile.isCloudAccount ? activeProfile.studyCards : [];
+    const { token, account } = await registerAccount(username, password, starterCards);
+    if (token) setAuthToken(token);
+    lastCloudUpdatedAtRef.current = account.updatedAt;
+    suppressNextCloudPushRef.current = true;
+
+    const cloudProfile: UserProfile = {
+      id: account.id,
+      name: account.username,
+      createdAt: account.createdAt,
+      studyCards: account.studyCards,
+      isCloudAccount: true,
+    };
+    setProfiles((prev) => [
+      cloudProfile,
+      ...prev.filter((p) => !p.isCloudAccount && p.id !== account.id),
+    ]);
+    setActiveProfileId(account.id);
     setActiveCardId(null);
+    phaseEndAtRef.current = null;
+    nextAlertAtRef.current = null;
+    saveTimerSnapshot(null);
     setActiveView(initialInviteRef.current ? 'workspace' : 'hub');
     setIsFocusRunning(false);
     setElapsedSessionSeconds(0);
     setActiveAlertBanner(null);
-    setCompanionCaption(`Hey ${profile.name} — ready whenever you open a study card.`);
+    setCompanionCaption(`Hey ${account.username} — your account is ready and synced.`);
+  };
+
+  const handleLoginCloudAccount = async (username: string, password: string) => {
+    const { token, account } = await loginAccount(username, password);
+    if (token) setAuthToken(token);
+    lastCloudUpdatedAtRef.current = account.updatedAt;
+    suppressNextCloudPushRef.current = true;
+
+    const cloudProfile: UserProfile = {
+      id: account.id,
+      name: account.username,
+      createdAt: account.createdAt,
+      studyCards: account.studyCards,
+      isCloudAccount: true,
+    };
+    setProfiles((prev) => [
+      cloudProfile,
+      ...prev.filter((p) => !p.isCloudAccount && p.id !== account.id),
+    ]);
+    setActiveProfileId(account.id);
+    setActiveCardId(null);
+    phaseEndAtRef.current = null;
+    nextAlertAtRef.current = null;
+    saveTimerSnapshot(null);
+    setActiveView(initialInviteRef.current ? 'workspace' : 'hub');
+    setIsFocusRunning(false);
+    setElapsedSessionSeconds(0);
+    setActiveAlertBanner(null);
+    setCompanionCaption(`Welcome back, ${account.username} — loaded ${account.studyCards.length} cards.`);
+  };
+
+  const handleSignOutCloudAccount = async () => {
+    if (authToken && activeProfile?.isCloudAccount) {
+      await syncAccountCards(authToken, activeProfile.studyCards);
+    }
+    setAuthToken(null);
+    hasUnsyncedCloudRef.current = false;
+    phaseEndAtRef.current = null;
+    nextAlertAtRef.current = null;
+    saveTimerSnapshot(null);
+
+    setProfiles((prev) => {
+      const localOnly = prev.filter((p) => !p.isCloudAccount);
+      setActiveProfileId(localOnly[0]?.id ?? null);
+      return localOnly;
+    });
+    setActiveCardId(null);
+    setActiveView('hub');
+    setIsFocusRunning(false);
+    setElapsedSessionSeconds(0);
+    setActiveAlertBanner(null);
   };
 
   const handleSelectProfile = (id: string) => {
@@ -389,6 +700,8 @@ export default function App() {
     if (!target) return;
     setActiveProfileId(id);
     setActiveCardId(null);
+    phaseEndAtRef.current = null;
+    nextAlertAtRef.current = null;
     setActiveView('hub');
     setIsFocusRunning(false);
     setElapsedSessionSeconds(0);
@@ -408,6 +721,28 @@ export default function App() {
     });
   };
 
+  const handleImportCardsBackup = (rawCards: StudySessionCard[]) => {
+    const imported = normalizeStudyCards(rawCards);
+    if (imported.length === 0) return;
+
+    if (!activeProfile) {
+      const fallback = createNewProfile('My Study Space');
+      fallback.studyCards = imported;
+      setProfiles([fallback]);
+      setActiveProfileId(fallback.id);
+      return;
+    }
+
+    updateActiveProfile((profile) => {
+      const existingIds = new Set(profile.studyCards.map((c) => c.id));
+      const newOnes = imported.filter((c) => !existingIds.has(c.id));
+      return {
+        ...profile,
+        studyCards: [...newOnes, ...profile.studyCards],
+      };
+    });
+  };
+
   const handleCreateCard = (title: string, accent: StudySessionCard['accent']) => {
     const card = createStudyCard(title, accent);
     updateActiveProfile((profile) => ({
@@ -419,6 +754,10 @@ export default function App() {
     setPanelMode('focus');
     setSprintPhase('work');
     setIsFocusRunning(false);
+    phaseEndAtRef.current = null;
+    runningSinceRef.current = null;
+    elapsedBaseRef.current = 0;
+    reminderFiredRef.current = false;
     setPhaseRemainingSeconds(card.timerSettings.workMinutes * 60);
     setElapsedSessionSeconds(0);
     setActiveTaskId(null);
@@ -426,15 +765,26 @@ export default function App() {
     setPose('speaking');
     sessionStartTimeRef.current = Date.now();
 
-    nextAlertAtRef.current = alertEnabled
+    const nextAlert = alertEnabled
       ? Date.now() + card.timerSettings.checkInMinutes * 60_000
       : null;
+    nextAlertAtRef.current = nextAlert;
     setSecondsUntilAlert(card.timerSettings.checkInMinutes * 60);
 
     const opening = buildSessionOpeningQuestion(profileName, card.title, false);
     setCompanionCaption(opening);
-    setSoraPromptMode('onboarding');
     triggerSimulatedSpeech(2400);
+    persistActiveTimerSnapshot({
+      cardId: card.id,
+      sprintPhase: 'work',
+      isFocusRunning: false,
+      phaseEndAt: null,
+      pausedRemainingSeconds: card.timerSettings.workMinutes * 60,
+      elapsedSessionSeconds: 0,
+      alertEnabled,
+      nextAlertAt: nextAlert,
+      checkInMinutes: card.timerSettings.checkInMinutes,
+    });
   };
 
   const handleRenameCard = (cardId: string, nextTitle: string) => {
@@ -569,7 +919,6 @@ export default function App() {
             ? tool.args.intervalMinutes
             : undefined;
         applyCheckInPreference(enabled, mins);
-        setSoraPromptMode('idle');
       }
     },
     [applyCheckInPreference, applyTaskActions]
@@ -701,7 +1050,6 @@ export default function App() {
     async (replyText: string) => {
       const trimmed = replyText.trim();
       if (!trimmed) return;
-      setIsSendingReply(true);
       setPose('speaking');
 
       try {
@@ -740,7 +1088,6 @@ export default function App() {
 
         const reply = data.reply ?? "Updated your plan—I'm right here with you.";
         setCompanionCaption(reply);
-        setSoraPromptMode('idle');
         setActiveAlertBanner(null);
 
         const isLive = liveVoiceRef.current?.status === 'live';
@@ -755,33 +1102,9 @@ export default function App() {
         setPose(data.pose ?? (isFocusRunning ? 'typing' : 'coffee'));
       } catch {
         setPose('coffee');
-      } finally {
-        setIsSendingReply(false);
       }
     },
     [alertEnabled, applyCheckInPreference, applyTaskActions, isFocusRunning, triggerSimulatedSpeech]
-  );
-
-  const handleQuickCheckInChoice = useCallback(
-    (minutes: number | null) => {
-      if (minutes === null) {
-        applyCheckInPreference(false);
-        const msg = `No problem, ${profileNameRef.current}—I'll stay quietly beside you without auto check-ins. Type or say what you want on your To-Do list anytime.`;
-        setCompanionCaption(msg);
-        setSoraPromptMode('idle');
-        triggerSimulatedSpeech(2200);
-      } else {
-        applyCheckInPreference(true, minutes);
-        const msg =
-          tasksRef.current.length === 0
-            ? `Got it—I'll check in every ${minutes} minutes! What's the main thing you want to work on first?`
-            : `Got it—I'll check in on your progress every ${minutes} minutes!`;
-        setCompanionCaption(msg);
-        setSoraPromptMode('idle');
-        triggerSimulatedSpeech(2200);
-      }
-    },
-    [applyCheckInPreference, triggerSimulatedSpeech]
   );
 
   const triggerAutomaticAlert = useCallback(async () => {
@@ -794,8 +1117,10 @@ export default function App() {
     const timerRunning = isFocusRunningRef.current;
 
     // Reset next wall-clock alert deadline immediately so it never stalls
-    nextAlertAtRef.current = Date.now() + settings.checkInMinutes * 60_000;
+    const nextTarget = Date.now() + settings.checkInMinutes * 60_000;
+    nextAlertAtRef.current = nextTarget;
     setSecondsUntilAlert(settings.checkInMinutes * 60);
+    persistActiveTimerSnapshot({ nextAlertAt: nextTarget });
 
     // Once the focus timer is running and no tasks were planned beforehand, do NOT disturb by asking what they plan to do
     if (timerRunning && currentTasks.length === 0) {
@@ -804,7 +1129,6 @@ export default function App() {
 
     setIsLoadingCheckIn(true);
     setPose('speaking');
-    setSoraPromptMode('checkin');
 
     if (settings.chimeEnabled) {
       playCueSound('checkin');
@@ -892,7 +1216,7 @@ export default function App() {
     } finally {
       setIsLoadingCheckIn(false);
     }
-  }, [isLoadingCheckIn, triggerSimulatedSpeech]);
+  }, [isLoadingCheckIn, persistActiveTimerSnapshot, triggerSimulatedSpeech]);
 
   const sprintCompleteHandlerRef = useRef<() => void>(() => {});
   const reminderHandlerRef = useRef<() => void>(() => {});
@@ -900,14 +1224,17 @@ export default function App() {
   alertTriggerRef.current = triggerAutomaticAlert;
 
   sprintCompleteHandlerRef.current = () => {
-    if (sprintPhase === 'work') {
-      const completedDuration = timerSettings.workMinutes * 60;
+    if (sprintPhaseRef.current === 'work') {
+      const completedDuration = timerSettingsRef.current.workMinutes * 60;
       saveLogEntry('work', completedDuration);
-      if (timerSettings.chimeEnabled) playCueSound('sprint_end');
+      if (timerSettingsRef.current.chimeEnabled) playCueSound('sprint_end');
+      const nextBreakSec = timerSettingsRef.current.breakMinutes * 60;
       setSprintPhase('break');
-      setPhaseRemainingSeconds(timerSettings.breakMinutes * 60);
+      setPhaseRemainingSeconds(nextBreakSec);
+      phaseEndAtRef.current = Date.now() + nextBreakSec * 1000;
+      reminderFiredRef.current = false;
       setPose('coffee');
-      const msg = `Nice steady work, ${profileName}. Enjoy a ${timerSettings.breakMinutes}-minute break.`;
+      const msg = `Nice steady work, ${profileNameRef.current}. Enjoy a ${timerSettingsRef.current.breakMinutes}-minute break.`;
       setActiveAlertBanner({
         kind: 'sprint_end',
         title: 'Work Sprint Complete',
@@ -916,11 +1243,14 @@ export default function App() {
       setCompanionCaption(msg);
       triggerSimulatedSpeech(2400);
     } else {
-      if (timerSettings.chimeEnabled) playCueSound('break_end');
+      if (timerSettingsRef.current.chimeEnabled) playCueSound('break_end');
+      const nextWorkSec = timerSettingsRef.current.workMinutes * 60;
       setSprintPhase('work');
-      setPhaseRemainingSeconds(timerSettings.workMinutes * 60);
+      setPhaseRemainingSeconds(nextWorkSec);
+      phaseEndAtRef.current = Date.now() + nextWorkSec * 1000;
+      reminderFiredRef.current = false;
       setPose('typing');
-      const msg = `Break complete — ready to ease back in, ${profileName}?`;
+      const msg = `Break complete — ready to ease back in, ${profileNameRef.current}?`;
       setActiveAlertBanner({
         kind: 'break_end',
         title: 'Break Complete',
@@ -932,48 +1262,91 @@ export default function App() {
   };
 
   reminderHandlerRef.current = () => {
-    if (timerSettings.chimeEnabled) playCueSound('reminder');
-    const mins = timerSettings.reminderMinutesBeforeEnd;
+    if (timerSettingsRef.current.chimeEnabled) playCueSound('reminder');
+    const mins = timerSettingsRef.current.reminderMinutesBeforeEnd;
     setActiveAlertBanner({
       kind: 'reminder',
       title: `${mins}m Reminder`,
       message:
-        sprintPhase === 'work'
+        sprintPhaseRef.current === 'work'
           ? `${mins} minute${mins === 1 ? '' : 's'} left in your work sprint.`
           : `${mins} minute${mins === 1 ? '' : 's'} left in your break.`,
     });
   };
 
-  // Sprint & Break countdown interval (only primitive dependencies!)
-  useEffect(() => {
-    if (!isFocusRunning || activeView !== 'workspace' || !activeCardId) return;
-    const id = window.setInterval(() => {
-      setElapsedSessionSeconds((prev) => prev + 1);
-      setPhaseRemainingSeconds((prev) => {
-        const next = prev - 1;
-        const reminderSec = timerSettingsRef.current.reminderMinutesBeforeEnd * 60;
-        const totalSec =
-          (sprintPhase === 'work'
-            ? timerSettingsRef.current.workMinutes
-            : timerSettingsRef.current.breakMinutes) * 60;
-        if (reminderSec > 0 && totalSec > reminderSec && next === reminderSec) {
-          reminderHandlerRef.current();
-        }
-        if (next <= 0) {
-          sprintCompleteHandlerRef.current();
-          return sprintPhase === 'work'
-            ? timerSettingsRef.current.breakMinutes * 60
-            : timerSettingsRef.current.workMinutes * 60;
-        }
-        return next;
-      });
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [activeCardId, activeView, isFocusRunning, sprintPhase]);
+  // Unified Wall-Clock Timer Sync (runs smoothly across app tabs & browser tab switches!)
+  const syncTimersFromWallClock = useCallback(() => {
+    const now = Date.now();
 
-  // Rock-solid Wall-Clock Automatic Check-In Interval (never resets on task/playlist edits!)
+    if (isFocusRunningRef.current && activeCardRef.current) {
+      if (!phaseEndAtRef.current) {
+        phaseEndAtRef.current = now + phaseRemainingRef.current * 1000;
+      }
+      if (!runningSinceRef.current) {
+        runningSinceRef.current = now;
+      }
+      const nextElapsed =
+        elapsedBaseRef.current + Math.max(0, Math.floor((now - runningSinceRef.current) / 1000));
+      setElapsedSessionSeconds(nextElapsed);
+
+      const rem = Math.max(0, Math.ceil((phaseEndAtRef.current - now) / 1000));
+      const reminderSec = timerSettingsRef.current.reminderMinutesBeforeEnd * 60;
+      const totalSec =
+        (sprintPhaseRef.current === 'work'
+          ? timerSettingsRef.current.workMinutes
+          : timerSettingsRef.current.breakMinutes) * 60;
+
+      if (
+        reminderSec > 0 &&
+        totalSec > reminderSec &&
+        rem > 0 &&
+        rem <= reminderSec &&
+        !reminderFiredRef.current
+      ) {
+        reminderFiredRef.current = true;
+        reminderHandlerRef.current();
+      }
+
+      if (rem <= 0) {
+        sprintCompleteHandlerRef.current();
+      } else {
+        setPhaseRemainingSeconds(rem);
+      }
+    }
+
+    if (alertEnabledRef.current && activeCardRef.current) {
+      const intervalMs = Math.max(1, timerSettingsRef.current.checkInMinutes) * 60_000;
+      if (!nextAlertAtRef.current) {
+        nextAlertAtRef.current = now + intervalMs;
+      }
+      const remainingMs = nextAlertAtRef.current - now;
+      if (remainingMs <= 0) {
+        nextAlertAtRef.current = now + intervalMs;
+        setSecondsUntilAlert(Math.round(intervalMs / 1000));
+        alertTriggerRef.current();
+      } else {
+        setSecondsUntilAlert(Math.ceil(remainingMs / 1000));
+      }
+    }
+  }, []);
+
+  // Sprint & Break wall-clock interval (active regardless of activeView tab!)
   useEffect(() => {
-    if (!alertEnabled || activeView !== 'workspace' || !activeCardId) {
+    if (!isFocusRunning || !activeCardId) return;
+    if (!phaseEndAtRef.current) {
+      phaseEndAtRef.current = Date.now() + phaseRemainingRef.current * 1000;
+    }
+    if (!runningSinceRef.current) {
+      runningSinceRef.current = Date.now();
+    }
+    syncTimersFromWallClock();
+    const id = window.setInterval(syncTimersFromWallClock, 1000);
+    return () => window.clearInterval(id);
+  }, [activeCardId, isFocusRunning, sprintPhase, syncTimersFromWallClock]);
+
+  // Automatic Check-In wall-clock interval (active across ALL tabs & never reset on view switches!)
+  useEffect(() => {
+    if (!alertEnabled || !activeCardId) {
       nextAlertAtRef.current = null;
       return;
     }
@@ -983,23 +1356,25 @@ export default function App() {
       nextAlertAtRef.current = Date.now() + intervalMs;
     }
 
-    const tick = () => {
-      const target = nextAlertAtRef.current;
-      if (!target) return;
-      const remainingMs = target - Date.now();
-      if (remainingMs <= 0) {
-        nextAlertAtRef.current = Date.now() + intervalMs;
-        setSecondsUntilAlert(Math.round(intervalMs / 1000));
-        alertTriggerRef.current();
-      } else {
-        setSecondsUntilAlert(Math.ceil(remainingMs / 1000));
+    syncTimersFromWallClock();
+    const id = window.setInterval(syncTimersFromWallClock, 1000);
+    return () => window.clearInterval(id);
+  }, [activeCardId, alertEnabled, syncTimersFromWallClock, timerSettings.checkInMinutes]);
+
+  // Immediate catch-up whenever returning from another browser tab or minimizing/restoring window
+  useEffect(() => {
+    const handleVisibilityOrFocus = () => {
+      if (!document.hidden) {
+        syncTimersFromWallClock();
       }
     };
-
-    tick();
-    const id = window.setInterval(tick, 1000);
-    return () => window.clearInterval(id);
-  }, [activeCardId, activeView, alertEnabled, timerSettings.checkInMinutes]);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+    };
+  }, [syncTimersFromWallClock]);
 
   // Task handlers scoped to active Study Card
   const handleAddTask = (title: string) => {
@@ -1013,9 +1388,6 @@ export default function App() {
     };
     updateActiveCard((c) => ({ ...c, tasks: [...c.tasks, item] }));
     setActiveTaskId((cur) => cur ?? item.id);
-    if (soraPromptMode === 'onboarding') {
-      setSoraPromptMode('idle');
-    }
   };
 
   const handleToggleTask = (taskId: string) => {
@@ -1203,40 +1575,88 @@ export default function App() {
   };
 
   const handleToggleFocus = () => {
-    setIsFocusRunning((prev) => {
-      const next = !prev;
-      if (next) {
-        if (elapsedSessionSeconds === 0) {
-          sessionStartTimeRef.current = Date.now();
-        }
-        setSoraPromptMode((cur) => (cur === 'onboarding' ? 'idle' : cur));
-        setCompanionCaption((caption) =>
-          caption.includes('What do you want to work on') ||
-          caption.includes("What's our focus first")
-            ? "Timer started — I'm studying quietly beside you."
-            : caption
-        );
+    const next = !isFocusRunning;
+    const now = Date.now();
+
+    if (next) {
+      if (elapsedSessionSeconds === 0) {
+        sessionStartTimeRef.current = now;
       }
-      setPose(next ? (sprintPhase === 'break' ? 'coffee' : 'typing') : 'coffee');
-      return next;
-    });
+      const nextPhaseEnd = now + phaseRemainingSeconds * 1000;
+      phaseEndAtRef.current = nextPhaseEnd;
+      elapsedBaseRef.current = elapsedSessionSeconds;
+      runningSinceRef.current = now;
+      reminderFiredRef.current = false;
+
+      setCompanionCaption((caption) =>
+        caption.includes('What are we working on') ||
+        caption.includes('What do you want to work on') ||
+        caption.includes("What's our focus first")
+          ? "Timer started — I'm studying quietly beside you."
+          : caption
+      );
+      persistActiveTimerSnapshot({
+        isFocusRunning: true,
+        phaseEndAt: nextPhaseEnd,
+        pausedRemainingSeconds: phaseRemainingSeconds,
+        elapsedSessionSeconds,
+      });
+    } else {
+      const rem = phaseEndAtRef.current
+        ? Math.max(0, Math.ceil((phaseEndAtRef.current - now) / 1000))
+        : phaseRemainingSeconds;
+      const totalElapsed = runningSinceRef.current
+        ? elapsedBaseRef.current + Math.max(0, Math.floor((now - runningSinceRef.current) / 1000))
+        : elapsedSessionSeconds;
+
+      phaseEndAtRef.current = null;
+      runningSinceRef.current = null;
+      elapsedBaseRef.current = totalElapsed;
+      setPhaseRemainingSeconds(rem);
+      setElapsedSessionSeconds(totalElapsed);
+      persistActiveTimerSnapshot({
+        isFocusRunning: false,
+        phaseEndAt: null,
+        pausedRemainingSeconds: rem,
+        elapsedSessionSeconds: totalElapsed,
+      });
+    }
+
+    setIsFocusRunning(next);
+    setPose(next ? (sprintPhase === 'break' ? 'coffee' : 'typing') : 'coffee');
   };
 
   const handleResetTimer = () => {
+    const resetSec =
+      (sprintPhase === 'work' ? timerSettings.workMinutes : timerSettings.breakMinutes) * 60;
+    phaseEndAtRef.current = null;
+    runningSinceRef.current = null;
+    reminderFiredRef.current = false;
     setIsFocusRunning(false);
-    setPhaseRemainingSeconds(
-      (sprintPhase === 'work' ? timerSettings.workMinutes : timerSettings.breakMinutes) * 60
-    );
+    setPhaseRemainingSeconds(resetSec);
     setPose('coffee');
+    persistActiveTimerSnapshot({
+      isFocusRunning: false,
+      phaseEndAt: null,
+      pausedRemainingSeconds: resetSec,
+    });
   };
 
   const handleSkipPhase = () => {
     const nextPhase: SprintPhase = sprintPhase === 'work' ? 'break' : 'work';
+    const nextSec =
+      (nextPhase === 'work' ? timerSettings.workMinutes : timerSettings.breakMinutes) * 60;
+    const nextEnd = isFocusRunning ? Date.now() + nextSec * 1000 : null;
+    phaseEndAtRef.current = nextEnd;
+    reminderFiredRef.current = false;
     setSprintPhase(nextPhase);
-    setPhaseRemainingSeconds(
-      (nextPhase === 'work' ? timerSettings.workMinutes : timerSettings.breakMinutes) * 60
-    );
+    setPhaseRemainingSeconds(nextSec);
     setPose(nextPhase === 'break' ? 'coffee' : isFocusRunning ? 'typing' : 'coffee');
+    persistActiveTimerSnapshot({
+      sprintPhase: nextPhase,
+      phaseEndAt: nextEnd,
+      pausedRemainingSeconds: nextSec,
+    });
   };
 
   const handleUpdateTimerSettings = (next: TimerSettings) => {
@@ -1254,10 +1674,13 @@ export default function App() {
       }
     }
     if (next.checkInMinutes !== prevAlert) {
-      nextAlertAtRef.current = alertEnabled
-        ? Date.now() + next.checkInMinutes * 60_000
-        : null;
+      const nextTarget = alertEnabled ? Date.now() + next.checkInMinutes * 60_000 : null;
+      nextAlertAtRef.current = nextTarget;
       setSecondsUntilAlert(next.checkInMinutes * 60);
+      persistActiveTimerSnapshot({
+        nextAlertAt: nextTarget,
+        checkInMinutes: next.checkInMinutes,
+      });
     }
   };
 
@@ -1357,7 +1780,7 @@ export default function App() {
     (sprintPhase === 'work' ? timerSettings.workMinutes : timerSettings.breakMinutes) * 60;
 
   return (
-    <div className="relative flex min-h-screen flex-col bg-[#090B14] text-slate-100 md:h-screen md:overflow-hidden">
+    <div className="relative flex min-h-screen flex-col bg-[#090B14] text-slate-100 lg:h-screen lg:overflow-hidden">
       <ParticleBackground />
 
       <TopBar
@@ -1393,14 +1816,12 @@ export default function App() {
         />
       ) : activeView === 'workspace' && activeCard ? (
         <main className="relative z-10 mx-auto grid w-full max-w-[1440px] flex-1 min-h-0 grid-cols-1 gap-3.5 px-4 py-3 sm:px-6 md:grid-cols-12 lg:px-8">
-          {/* Left 1/3 Column: Realistic Sora + Inline Answer Bar on Top, Self-View / Friend Co-Study Below */}
-          <div className="flex min-h-0 flex-col gap-3 md:col-span-4">
+          {/* Left Column: Realistic Sora Voice + Generous Full-Face Camera / Friend Co-Study */}
+          <div className="flex min-h-0 flex-col gap-3 md:col-span-5 lg:col-span-4">
             <CompanionStage
               pose={pose}
               caption={companionCaption}
-              promptMode={soraPromptMode}
               isSimulatingSpeech={isSimulatingSpeech}
-              isSendingReply={isSendingReply}
               liveStatus={liveVoice.status}
               liveMuted={liveVoice.isMuted}
               isAssistantSpeaking={liveVoice.isAssistantSpeaking}
@@ -1413,8 +1834,6 @@ export default function App() {
               onStopVoice={liveVoice.stopVoice}
               onReconnectVoice={liveVoice.reconnectLive}
               onToggleLiveMute={liveVoice.toggleMute}
-              onReplyToSora={handleReplyToSora}
-              onQuickCheckInChoice={handleQuickCheckInChoice}
             />
 
             <CoStudyRoomPanel
@@ -1431,8 +1850,8 @@ export default function App() {
             />
           </div>
 
-          {/* Right 2/3 Column: Slim Timer + Mode Switcher on Top, Focus Plan OR Full-Width Video & Playlist Below */}
-          <div className="flex min-h-0 flex-col gap-3 md:col-span-8">
+          {/* Right Column: Slim Timer + Visible Check-in Countdown + Focus Plan / Video & Playlist */}
+          <div className="flex min-h-0 flex-col gap-3 md:col-span-7 lg:col-span-8">
             <SessionTimerBar
               panelMode={panelMode}
               onChangePanelMode={setPanelMode}
@@ -1512,13 +1931,18 @@ export default function App() {
 
       <ProfileOnboardingModal
         isOpen={isProfileModalOpen}
-        canDismiss={profiles.length > 0}
+        canDismiss={Boolean(activeProfile)}
         profiles={profiles}
-        activeProfileId={activeProfileId}
+        activeProfile={activeProfile}
+        isCloudSignedIn={Boolean(authToken && activeProfile?.isCloudAccount)}
+        isSyncing={isSyncingAccount}
         onClose={() => setIsProfileModalOpen(false)}
-        onCreateProfile={handleCreateProfile}
-        onSelectProfile={handleSelectProfile}
-        onDeleteProfile={handleDeleteProfile}
+        onRegisterCloudAccount={handleRegisterCloudAccount}
+        onLoginCloudAccount={handleLoginCloudAccount}
+        onSignOutCloudAccount={handleSignOutCloudAccount}
+        onSelectLocalProfile={handleSelectProfile}
+        onDeleteLocalProfile={handleDeleteProfile}
+        onImportCardsBackup={handleImportCardsBackup}
       />
     </div>
   );

@@ -87,10 +87,25 @@ export interface UserProfile {
   name: string;
   createdAt: number;
   studyCards: StudySessionCard[];
+  isCloudAccount?: boolean;
   // Legacy fallback fields kept optional for smooth migration
   timerSettings?: TimerSettings;
   tasks?: TaskItem[];
   sessionLogs?: SessionLog[];
+}
+
+export interface ActiveTimerSnapshot {
+  profileId: string;
+  cardId: string;
+  sprintPhase: SprintPhase;
+  isFocusRunning: boolean;
+  phaseEndAt: number | null;
+  pausedRemainingSeconds: number;
+  elapsedSessionSeconds: number;
+  alertEnabled: boolean;
+  nextAlertAt: number | null;
+  checkInMinutes: number;
+  updatedAt: number;
 }
 
 export interface RoomParticipant {

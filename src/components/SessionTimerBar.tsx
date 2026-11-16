@@ -201,12 +201,12 @@ export function SessionTimerBar({
           </div>
         </div>
 
-        {/* Right: Built-In User-Demand Automatic Alert Timer */}
+        {/* Right: Built-In & AI-Synced Automatic Check-In Timer (Always visible on tablet & desktop) */}
         <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={onToggleAlertEnabled}
-            title={alertEnabled ? 'Disable automatic alerts' : 'Enable automatic alerts'}
+            title={alertEnabled ? 'Disable automatic check-in timer' : 'Enable automatic check-in timer'}
             className={`flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors whitespace-nowrap ${
               alertEnabled
                 ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
@@ -214,14 +214,14 @@ export function SessionTimerBar({
             }`}
           >
             {alertEnabled ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
-            <span>Auto</span>
+            <span>Check-in</span>
           </button>
 
           <input
             type="number"
             min={1}
             max={180}
-            aria-label="Custom automatic alert minutes"
+            aria-label="Check-in interval in minutes"
             value={timerSettings.checkInMinutes}
             onChange={(e) =>
               onUpdateTimerSettings({
@@ -229,13 +229,16 @@ export function SessionTimerBar({
                 checkInMinutes: Math.max(1, Math.min(180, Number(e.target.value) || 1)),
               })
             }
-            className="font-mono-tabular h-7 w-11 rounded border border-white/10 bg-[#090C18] px-1 text-center text-[11px] text-slate-200 focus:border-amber-400/50 focus:outline-none"
+            className="font-mono-tabular h-7 w-11 rounded border border-white/10 bg-[#090C18] px-1 text-center text-[11px] text-slate-100 focus:border-amber-400/50 focus:outline-none"
           />
-          <span className="text-[11px] text-slate-500">m</span>
+          <span className="text-[11px] text-slate-400">m</span>
 
           {alertEnabled && (
-            <span className="font-mono-tabular hidden text-[11px] text-slate-400 xl:inline">
-              {formatClock(secondsUntilAlert)}
+            <span
+              aria-label="Time left until next AI check-in"
+              className="font-mono-tabular rounded border border-amber-400/25 bg-[#090C18] px-2 py-0.5 text-[11px] font-semibold text-amber-200 whitespace-nowrap"
+            >
+              {formatClock(secondsUntilAlert)} left
             </span>
           )}
 

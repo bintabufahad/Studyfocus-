@@ -1,4 +1,5 @@
 import type {
+  ActiveTimerSnapshot,
   SessionLog,
   StudySessionCard,
   TaskItem,
@@ -8,6 +9,8 @@ import type {
 
 const PROFILES_KEY = 'focuspair.profiles.v2';
 const ACTIVE_PROFILE_KEY = 'focuspair.activeProfileId.v2';
+const AUTH_TOKEN_KEY = 'focuspair.authToken.v1';
+const TIMER_SNAPSHOT_KEY = 'focuspair.activeTimer.v1';
 
 export const DEFAULT_TIMER_SETTINGS: TimerSettings = {
   workMinutes: 25,
@@ -38,33 +41,49 @@ export function createStudyCard(
   };
 }
 
-export function createNewProfile(name: string): UserProfile {
+export function createNewProfile(name: string, id?: string, isCloudAccount = false): UserProfile {
   return {
-    id: `prof-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    id: id ?? `prof-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     name: name.trim() || 'Guest',
     createdAt: Date.now(),
     studyCards: [],
+    isCloudAccount,
   };
 }
 
-function migrateProfile(raw: UserProfile): UserProfile {
-  const cards: StudySessionCard[] = Array.isArray(raw.studyCards)
-    ? raw.studyCards.map((c) => ({
-        ...c,
-        accent: c.accent ?? 'amber',
-        tasks: Array.isArray(c.tasks) ? c.tasks : [],
-        playlist: Array.isArray(c.playlist)
-          ? c.playlist.filter((v) => v.sourceType !== 'local')
-          : [],
-        activeVideoId: c.activeVideoId ?? null,
-        timerSettings: { ...DEFAULT_TIMER_SETTINGS, ...(c.timerSettings ?? {}) },
-        sessionLogs: Array.isArray(c.sessionLogs)
-          ? c.sessionLogs.map((l) => ({ ...l, videoUrl: undefined }))
-          : [],
-      }))
-    : [];
+export function normalizeStudyCards(rawCards: unknown[]): StudySessionCard[] {
+  if (!Array.isArray(rawCards)) return [];
+  return rawCards
+    .filter((c): c is StudySessionCard => Boolean(c && typeof c === 'object' && 'id' in c))
+    .map((c) => ({
+      ...c,
+      title: typeof c.title === 'string' && c.title.trim() ? c.title : 'Untitled Study Session',
+      accent: c.accent ?? 'amber',
+      createdAt: typeof c.createdAt === 'number' ? c.createdAt : Date.now(),
+      lastOpenedAt: typeof c.lastOpenedAt === 'number' ? c.lastOpenedAt : Date.now(),
+      tasks: Array.isArray(c.tasks) ? c.tasks : [],
+      playlist: Array.isArray(c.playlist)
+        ? c.playlist.filter((v) => v.sourceType !== 'local')
+        : [],
+      activeVideoId: c.activeVideoId ?? null,
+      timerSettings: { ...DEFAULT_TIMER_SETTINGS, ...(c.timerSettings ?? {}) },
+      sessionLogs: Array.isArray(c.sessionLogs)
+        ? c.sessionLogs.map((l) => ({ ...l, videoUrl: undefined }))
+        : [],
+    }));
+}
 
-  // Migrate legacy v2 profile tasks/logs into a starter card if any existed
+export function sanitizeStudyCardsForSync(cards: StudySessionCard[]): StudySessionCard[] {
+  return cards.map((c) => ({
+    ...c,
+    playlist: c.playlist.filter((v) => v.sourceType !== 'local'),
+    sessionLogs: c.sessionLogs.map(({ videoUrl: _omit, ...rest }) => rest),
+  }));
+}
+
+function migrateProfile(raw: UserProfile): UserProfile {
+  const cards = normalizeStudyCards(raw.studyCards);
+
   if (
     cards.length === 0 &&
     ((raw.tasks && raw.tasks.length > 0) || (raw.sessionLogs && raw.sessionLogs.length > 0))
@@ -87,6 +106,7 @@ function migrateProfile(raw: UserProfile): UserProfile {
     name: raw.name,
     createdAt: raw.createdAt ?? Date.now(),
     studyCards: cards,
+    isCloudAccount: Boolean(raw.isCloudAccount),
   };
 }
 
@@ -108,12 +128,8 @@ export function saveProfiles(profiles: UserProfile[]): void {
       id: p.id,
       name: p.name,
       createdAt: p.createdAt,
-      studyCards: p.studyCards.map((c) => ({
-        ...c,
-        // Local blob URLs cannot persist across page reloads
-        playlist: c.playlist.filter((v) => v.sourceType !== 'local'),
-        sessionLogs: c.sessionLogs.map(({ videoUrl: _omit, ...rest }) => rest),
-      })),
+      isCloudAccount: Boolean(p.isCloudAccount),
+      studyCards: sanitizeStudyCardsForSync(p.studyCards),
     }));
     localStorage.setItem(PROFILES_KEY, JSON.stringify(serializable));
   } catch {
@@ -138,6 +154,149 @@ export function saveActiveProfileId(id: string | null): void {
     }
   } catch {
     // Ignore
+  }
+}
+
+export function loadAuthToken(): string | null {
+  try {
+    return localStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function saveAuthToken(token: string | null): void {
+  try {
+    if (token) {
+      localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  } catch {
+    // Ignore
+  }
+}
+
+export interface ServerAccountResponse {
+  token?: string;
+  account: {
+    id: string;
+    username: string;
+    createdAt: number;
+    updatedAt: number;
+    studyCards: StudySessionCard[];
+  };
+}
+
+export async function registerAccount(
+  username: string,
+  password: string,
+  studyCards: StudySessionCard[] = []
+): Promise<ServerAccountResponse> {
+  const res = await fetch('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username,
+      password,
+      studyCards: sanitizeStudyCardsForSync(studyCards),
+    }),
+  });
+  const data = (await res.json()) as ServerAccountResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || 'Could not create account.');
+  }
+  return {
+    token: data.token,
+    account: {
+      ...data.account,
+      studyCards: normalizeStudyCards(data.account.studyCards),
+    },
+  };
+}
+
+export async function loginAccount(
+  username: string,
+  password: string
+): Promise<ServerAccountResponse> {
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = (await res.json()) as ServerAccountResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || 'Sign in failed.');
+  }
+  return {
+    token: data.token,
+    account: {
+      ...data.account,
+      studyCards: normalizeStudyCards(data.account.studyCards),
+    },
+  };
+}
+
+export async function fetchCurrentAccount(token: string): Promise<ServerAccountResponse['account'] | null> {
+  try {
+    const res = await fetch('/api/account/me', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { account: ServerAccountResponse['account'] };
+    return {
+      ...data.account,
+      studyCards: normalizeStudyCards(data.account.studyCards),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function syncAccountCards(
+  token: string,
+  cards: StudySessionCard[],
+  keepalive = false
+): Promise<boolean> {
+  try {
+    const res = await fetch('/api/account/sync', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      keepalive,
+      body: JSON.stringify({
+        studyCards: sanitizeStudyCardsForSync(cards),
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export function loadTimerSnapshot(): ActiveTimerSnapshot | null {
+  try {
+    const raw = localStorage.getItem(TIMER_SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ActiveTimerSnapshot;
+    if (!parsed || typeof parsed.cardId !== 'string') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function saveTimerSnapshot(snapshot: ActiveTimerSnapshot | null): void {
+  try {
+    if (!snapshot) {
+      localStorage.removeItem(TIMER_SNAPSHOT_KEY);
+      return;
+    }
+    localStorage.setItem(TIMER_SNAPSHOT_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Ignore storage quota errors
   }
 }
 

@@ -6,8 +6,10 @@ import {
   FlipHorizontal2,
   Link2,
   LogOut,
+  Maximize2,
   Mic,
   MicOff,
+  Minimize2,
   Square,
   Users,
   Video,
@@ -80,6 +82,7 @@ export function CoStudyRoomPanel({
   const [cameraOn, setCameraOn] = useState(false);
   const [micMuted, setMicMuted] = useState(true);
   const [mirrored, setMirrored] = useState(true);
+  const [fillFrame, setFillFrame] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'manual'>('idle');
@@ -253,7 +256,7 @@ export function CoStudyRoomPanel({
   return (
     <section
       aria-label="Self-View Camera and Friend Study Room"
-      className="glass-panel flex min-h-[190px] flex-1 flex-col overflow-hidden rounded-xl"
+      className="glass-panel flex min-h-[250px] flex-1 flex-col overflow-hidden rounded-xl"
     >
       {/* Top Bar: Share Friend Link + Join + Camera Controls */}
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 border-b border-white/[0.07] px-3 py-2">
@@ -322,6 +325,20 @@ export function CoStudyRoomPanel({
             }`}
           >
             <FlipHorizontal2 className="h-3 w-3" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setFillFrame((f) => !f)}
+            title={fillFrame ? 'Show full camera frame (Fit)' : 'Zoom to fill frame (Fill)'}
+            aria-label={fillFrame ? 'Show full camera frame' : 'Zoom to fill frame'}
+            className={`flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors ${
+              !fillFrame
+                ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+                : 'border-white/[0.08] bg-white/[0.03] text-slate-400'
+            }`}
+          >
+            {fillFrame ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
           </button>
 
           <button
@@ -430,16 +447,16 @@ export function CoStudyRoomPanel({
       )}
 
       {/* Camera / Friend Co-Study Viewport */}
-      <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0A0D18]">
-        {/* Self-view video */}
+      <div className="relative min-h-[200px] flex-1 overflow-hidden bg-[#070A14]">
+        {/* Self-view video (Fit by default so full face & head stay uncropped) */}
         <video
           ref={selfVideoRef}
           autoPlay
           playsInline
           muted
-          className={`h-full w-full object-cover transition-opacity duration-300 ${
-            cameraOn ? 'opacity-100' : 'opacity-0'
-          } ${mirrored ? '-scale-x-100' : ''}`}
+          className={`h-full w-full transition-opacity duration-300 ${
+            fillFrame ? 'object-cover' : 'object-contain'
+          } ${cameraOn ? 'opacity-100' : 'opacity-0'} ${mirrored ? '-scale-x-100' : ''}`}
         />
 
         {/* Remote friend live camera picture-in-picture if active */}

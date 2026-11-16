@@ -24,7 +24,7 @@ export function TopBar({
   logsCount,
 }: TopBarProps) {
   return (
-    <header className="relative z-20 mx-auto flex w-full max-w-[1440px] shrink-0 items-center justify-between gap-8 border-b border-white/[0.07] px-4 py-2 sm:px-6 lg:px-8">
+    <header className="relative z-20 mx-auto flex w-full max-w-[1440px] shrink-0 items-center justify-between gap-4 border-b border-white/[0.07] px-4 py-2 sm:px-6 lg:gap-8 lg:px-8">
       {/* Zone 1: Single-element brand wordmark */}
       <button
         type="button"
@@ -35,7 +35,7 @@ export function TopBar({
       </button>
 
       {/* Zone 2: Concise single-line navigation links */}
-      <nav aria-label="Primary" className="flex items-center gap-6 sm:gap-8">
+      <nav aria-label="Primary" className="flex items-center gap-4 sm:gap-6 lg:gap-8">
         <button
           type="button"
           onClick={() => onSelectView('hub')}
@@ -52,7 +52,7 @@ export function TopBar({
           <button
             type="button"
             onClick={() => onSelectView('workspace')}
-            className={`cursor-pointer max-w-[180px] truncate text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400 ${
+            className={`cursor-pointer max-w-[140px] truncate text-sm font-medium transition-colors whitespace-nowrap shrink-0 sm:max-w-[180px] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400 ${
               activeView === 'workspace'
                 ? 'text-amber-300 underline decoration-amber-400/60 underline-offset-8'
                 : 'text-slate-400 hover:text-slate-100'
@@ -79,7 +79,7 @@ export function TopBar({
           onClick={onOpenProfiles}
           className="cursor-pointer text-sm font-medium text-slate-400 transition-colors hover:text-slate-100 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400"
         >
-          Profile: {profileName}
+          Account: {profileName}
         </button>
       </nav>
 

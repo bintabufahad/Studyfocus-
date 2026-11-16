@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -175,9 +177,142 @@ function broadcastRoomState(room: StudyRoom) {
   }
 }
 
+// Persistent server-side Username + Password account storage (no external email provider needed)
+interface StoredAccount {
+  id: string;
+  username: string;
+  usernameLower: string;
+  passwordSalt: string;
+  passwordHash: string;
+  studyCards: unknown[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+const DATA_DIR = path.resolve(__dirname, '.focuspair-data');
+const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
+const AUTH_SECRET_FILE = path.join(DATA_DIR, 'auth-secret.txt');
+
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+}
+
+function loadOrCreateAuthSecret(): string {
+  try {
+    ensureDataDir();
+    if (fs.existsSync(AUTH_SECRET_FILE)) {
+      const existing = fs.readFileSync(AUTH_SECRET_FILE, 'utf8').trim();
+      if (existing.length >= 32) return existing;
+    }
+    const fresh = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(AUTH_SECRET_FILE, fresh, 'utf8');
+    return fresh;
+  } catch {
+    return process.env.AUTH_SECRET || 'focuspair-fallback-session-secret';
+  }
+}
+
+const AUTH_SECRET = loadOrCreateAuthSecret();
+const accountStore = new Map<string, StoredAccount>();
+
+function loadAccountsFromDisk() {
+  try {
+    ensureDataDir();
+    if (!fs.existsSync(ACCOUNTS_FILE)) return;
+    const raw = fs.readFileSync(ACCOUNTS_FILE, 'utf8');
+    const parsed = JSON.parse(raw) as StoredAccount[];
+    if (!Array.isArray(parsed)) return;
+    for (const acc of parsed) {
+      if (acc && typeof acc.usernameLower === 'string') {
+        accountStore.set(acc.usernameLower, acc);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load accounts file:', err);
+  }
+}
+
+function saveAccountsToDisk() {
+  try {
+    ensureDataDir();
+    const list = Array.from(accountStore.values());
+    const tmp = `${ACCOUNTS_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(list), 'utf8');
+    fs.renameSync(tmp, ACCOUNTS_FILE);
+  } catch (err) {
+    console.error('Failed to persist accounts file:', err);
+  }
+}
+
+loadAccountsFromDisk();
+
+function hashPassword(password: string, saltHex?: string): { salt: string; hash: string } {
+  const salt = saltHex ?? crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return { salt, hash };
+}
+
+function verifyPassword(password: string, saltHex: string, expectedHashHex: string): boolean {
+  try {
+    const derived = crypto.scryptSync(password, saltHex, 64);
+    const expected = Buffer.from(expectedHashHex, 'hex');
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
+}
+
+function issueAuthToken(account: StoredAccount): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      sub: account.id,
+      u: account.usernameLower,
+      iat: Date.now(),
+    })
+  ).toString('base64url');
+  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyAuthToken(token: string): StoredAccount | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [payloadB64, sigB64] = parts;
+    const expectedSig = crypto
+      .createHmac('sha256', AUTH_SECRET)
+      .update(payloadB64)
+      .digest('base64url');
+    const a = Buffer.from(sigB64);
+    const b = Buffer.from(expectedSig);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+      sub?: string;
+      u?: string;
+    };
+    if (!payload.u) return null;
+    const acc = accountStore.get(payload.u);
+    if (!acc || acc.id !== payload.sub) return null;
+    return acc;
+  } catch {
+    return null;
+  }
+}
+
+function extractBearerToken(req: Request): string | null {
+  const header = req.headers.authorization;
+  if (typeof header === 'string' && header.startsWith('Bearer ')) {
+    return header.slice(7).trim();
+  }
+  return null;
+}
+
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '4mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ ok: true });
@@ -191,6 +326,126 @@ async function startServer() {
         : null;
     res.json({ appUrl });
   });
+
+  app.post('/api/auth/register', (req: Request, res: Response) => {
+    const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+    const initialCards = Array.isArray(req.body?.studyCards) ? req.body.studyCards : [];
+
+    if (rawUsername.length < 2 || rawUsername.length > 40) {
+      res.status(400).json({ error: 'Name must be between 2 and 40 characters.' });
+      return;
+    }
+    if (rawPassword.length < 4 || rawPassword.length > 120) {
+      res.status(400).json({ error: 'Password must be at least 4 characters.' });
+      return;
+    }
+
+    const key = rawUsername.toLowerCase();
+    if (accountStore.has(key)) {
+      res.status(409).json({
+        error: 'This username is already taken. Sign in with your password or choose another name.',
+      });
+      return;
+    }
+
+    const { salt, hash } = hashPassword(rawPassword);
+    const now = Date.now();
+    const account: StoredAccount = {
+      id: `acc-${now.toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
+      username: rawUsername,
+      usernameLower: key,
+      passwordSalt: salt,
+      passwordHash: hash,
+      studyCards: initialCards,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    accountStore.set(key, account);
+    saveAccountsToDisk();
+
+    const token = issueAuthToken(account);
+    res.status(201).json({
+      token,
+      account: {
+        id: account.id,
+        username: account.username,
+        createdAt: account.createdAt,
+        updatedAt: account.updatedAt,
+        studyCards: account.studyCards,
+      },
+    });
+  });
+
+  app.post('/api/auth/login', (req: Request, res: Response) => {
+    const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+    const key = rawUsername.toLowerCase();
+
+    const account = accountStore.get(key);
+    if (!account || !verifyPassword(rawPassword, account.passwordSalt, account.passwordHash)) {
+      res.status(401).json({ error: 'Incorrect username or password.' });
+      return;
+    }
+
+    const token = issueAuthToken(account);
+    res.json({
+      token,
+      account: {
+        id: account.id,
+        username: account.username,
+        createdAt: account.createdAt,
+        updatedAt: account.updatedAt,
+        studyCards: account.studyCards,
+      },
+    });
+  });
+
+  app.get('/api/account/me', (req: Request, res: Response) => {
+    const token = extractBearerToken(req);
+    const account = token ? verifyAuthToken(token) : null;
+    if (!account) {
+      res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
+      return;
+    }
+
+    res.json({
+      account: {
+        id: account.id,
+        username: account.username,
+        createdAt: account.createdAt,
+        updatedAt: account.updatedAt,
+        studyCards: account.studyCards,
+      },
+    });
+  });
+
+  const handleAccountSync = (req: Request, res: Response) => {
+    const token =
+      extractBearerToken(req) ??
+      (typeof req.body?.token === 'string' ? req.body.token : null);
+    const account = token ? verifyAuthToken(token) : null;
+    if (!account) {
+      res.status(401).json({ error: 'Unauthorized sync request.' });
+      return;
+    }
+
+    if (!Array.isArray(req.body?.studyCards)) {
+      res.status(400).json({ error: 'Invalid studyCards payload.' });
+      return;
+    }
+
+    account.studyCards = req.body.studyCards;
+    account.updatedAt = Date.now();
+    accountStore.set(account.usernameLower, account);
+    saveAccountsToDisk();
+
+    res.json({ ok: true, updatedAt: account.updatedAt });
+  };
+
+  app.put('/api/account/sync', handleAccountSync);
+  app.post('/api/account/sync', handleAccountSync);
 
   // Companion reply + live To-Do task extraction + check-in preference updates
   app.post('/api/chat', async (req: Request, res: Response) => {

@@ -117,10 +117,10 @@ export function LivingSoraAvatar({
   const mouthHalfW = 10.2 - effectiveOpen * 1.8;
 
   return (
-    <div className="relative aspect-[16/9] w-full overflow-hidden bg-[#090D1B]">
+    <div className="relative aspect-[16/9] max-h-[170px] w-full overflow-hidden bg-[#090D1B] lg:max-h-[198px]">
       <svg
         viewBox="0 0 640 360"
-        className="h-full w-full select-none"
+        className="h-full w-full select-none object-cover"
         role="img"
         aria-label="Sora keeping you company at her midnight desk"
       >
