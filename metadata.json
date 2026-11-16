@@ -1,0 +1,6 @@
+{
+  "name": "FocusPair",
+  "description": "ADHD-friendly body doubling and accountability workspace with an interactive AI companion, real-time Gemini Live voice conversations, dynamic task breakdown, and self-view session logging.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
