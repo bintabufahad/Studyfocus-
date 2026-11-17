@@ -60,19 +60,19 @@ export function CompanionStage({
       />
 
       {/* Single-Row Live Voice Companion Controls (Chat box & check-in chips removed to maximize camera) */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.07] bg-white/[0.02] px-3 py-1.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-cyan-200/[0.08] bg-cyan-400/[0.02] px-3 py-1.5">
         <div className="flex items-center gap-1.5">
-          <Volume2 className="h-3.5 w-3.5 text-amber-300 shrink-0" />
-          <span className="text-xs font-medium text-slate-300">Sora Voice</span>
+          <Volume2 className="h-3.5 w-3.5 text-cyan-300 shrink-0" />
+          <span className="text-xs font-medium text-slate-200">Sora Voice</span>
 
           {liveStatus === 'live' && (
-            <span className="flex items-center gap-1 text-[11px] text-emerald-300">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            <span className="flex items-center gap-1 text-[11px] text-cyan-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-cyan-300 shadow-[0_0_6px_rgba(103,232,249,0.9)]" />
               Live
             </span>
           )}
           {liveStatus === 'connecting' && (
-            <span className="text-[11px] text-amber-300">Connecting...</span>
+            <span className="text-[11px] text-amber-200">Connecting...</span>
           )}
         </div>
 
@@ -84,8 +84,8 @@ export function CompanionStage({
                 onClick={onToggleLiveMute}
                 className={`flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 ${
                   liveMuted
-                    ? 'border-rose-400/30 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
-                    : 'border-white/10 bg-white/5 text-slate-200 hover:bg-white/10'
+                    ? 'border-rose-400/35 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
+                    : 'border-cyan-200/15 bg-cyan-400/[0.06] text-slate-200 hover:border-cyan-300/40 hover:text-cyan-100'
                 }`}
               >
                 {liveMuted ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
@@ -96,14 +96,14 @@ export function CompanionStage({
                 onClick={onReconnectVoice}
                 title="Refresh voice connection"
                 aria-label="Refresh voice connection"
-                className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md border border-cyan-200/15 bg-cyan-400/[0.06] text-slate-300 hover:border-cyan-300/40 hover:text-cyan-100"
               >
                 <RefreshCw className="h-3 w-3" />
               </button>
               <button
                 type="button"
                 onClick={onStopVoice}
-                className="flex cursor-pointer items-center gap-1 rounded-md border border-rose-400/30 bg-rose-500/15 px-2 py-1 text-[11px] font-medium text-rose-200 transition-colors hover:bg-rose-500/25 whitespace-nowrap shrink-0"
+                className="flex cursor-pointer items-center gap-1 rounded-md border border-rose-400/35 bg-rose-500/15 px-2 py-1 text-[11px] font-medium text-rose-200 transition-colors hover:bg-rose-500/25 whitespace-nowrap shrink-0"
               >
                 <PhoneOff className="h-3 w-3" />
                 End
@@ -113,9 +113,9 @@ export function CompanionStage({
             <button
               type="button"
               onClick={onStartVoice}
-              className="flex cursor-pointer items-center gap-1 rounded-md bg-amber-400/15 px-2.5 py-1 text-[11px] font-medium text-amber-200 ring-1 ring-amber-400/30 transition-colors hover:bg-amber-400/25 whitespace-nowrap shrink-0"
+              className="bio-glow-chip flex cursor-pointer items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-all hover:brightness-115 whitespace-nowrap shrink-0"
             >
-              <Mic className="h-3 w-3" />
+              <Mic className="h-3 w-3 text-cyan-200" />
               Talk Live
             </button>
           )}

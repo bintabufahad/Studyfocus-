@@ -127,10 +127,10 @@ export function ProfileOnboardingModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="profile-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[#02040B]/75 p-4 backdrop-blur-md"
     >
       <div className="glass-panel max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl p-6 shadow-2xl">
-        <div className="flex items-center justify-between gap-4 border-b border-white/[0.08] pb-3.5">
+        <div className="flex items-center justify-between gap-4 border-b border-cyan-200/[0.1] pb-3.5">
           <div>
             <h2
               id="profile-modal-title"
@@ -147,7 +147,7 @@ export function ProfileOnboardingModal({
               type="button"
               onClick={onClose}
               aria-label="Close account dialog"
-              className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-white/10 hover:text-slate-100 shrink-0"
+              className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-cyan-400/15 hover:text-cyan-100 shrink-0"
             >
               <X className="h-4 w-4" />
             </button>
@@ -156,13 +156,13 @@ export function ProfileOnboardingModal({
 
         {/* Active Signed-In Account Summary */}
         {activeProfile && (
-          <div className="mt-4 rounded-lg border border-white/[0.08] bg-[#0B0F1E]/90 p-3.5">
+          <div className="mt-4 rounded-lg border border-cyan-200/[0.12] bg-[#040814]/80 p-3.5">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <Cloud
                     className={`h-3.5 w-3.5 shrink-0 ${
-                      isCloudSignedIn ? 'text-emerald-300' : 'text-amber-300'
+                      isCloudSignedIn ? 'text-cyan-300' : 'text-amber-300'
                     }`}
                   />
                   <span className="truncate text-sm font-semibold text-slate-100">
@@ -185,7 +185,7 @@ export function ProfileOnboardingModal({
                     await onSignOutCloudAccount();
                     setAuthTab('login');
                   }}
-                  className="flex cursor-pointer items-center gap-1 rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-rose-500/15 hover:text-rose-200 whitespace-nowrap shrink-0"
+                  className="flex cursor-pointer items-center gap-1 rounded-md border border-cyan-200/15 bg-cyan-400/[0.05] px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-rose-500/15 hover:text-rose-200 whitespace-nowrap shrink-0"
                 >
                   <LogOut className="h-3.5 w-3.5" />
                   Sign Out
@@ -194,11 +194,11 @@ export function ProfileOnboardingModal({
             </div>
 
             {/* Backup Export / Import row */}
-            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-white/[0.07] pt-2.5">
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-cyan-200/[0.08] pt-2.5">
               <button
                 type="button"
                 onClick={handleExportBackup}
-                className="flex cursor-pointer items-center gap-1 rounded border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10"
+                className="flex cursor-pointer items-center gap-1 rounded border border-cyan-200/15 bg-cyan-400/[0.05] px-2.5 py-1 text-[11px] text-slate-300 hover:border-cyan-300/35 hover:text-cyan-100"
               >
                 <Download className="h-3 w-3" />
                 Export Backup
@@ -206,7 +206,7 @@ export function ProfileOnboardingModal({
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="flex cursor-pointer items-center gap-1 rounded border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10"
+                className="flex cursor-pointer items-center gap-1 rounded border border-cyan-200/15 bg-cyan-400/[0.05] px-2.5 py-1 text-[11px] text-slate-300 hover:border-cyan-300/35 hover:text-cyan-100"
               >
                 <Upload className="h-3 w-3" />
                 Import Backup
@@ -219,7 +219,7 @@ export function ProfileOnboardingModal({
                 className="hidden"
               />
               {backupNotice && (
-                <span className="text-[11px] text-emerald-300">{backupNotice}</span>
+                <span className="text-[11px] text-cyan-300">{backupNotice}</span>
               )}
             </div>
           </div>
@@ -239,8 +239,8 @@ export function ProfileOnboardingModal({
                     key={p.id}
                     className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-1.5 ${
                       isActive
-                        ? 'border-amber-400/40 bg-amber-400/10'
-                        : 'border-white/[0.07] bg-white/[0.03] hover:bg-white/[0.06]'
+                        ? 'bio-glow-chip'
+                        : 'border-cyan-200/[0.08] bg-cyan-400/[0.03] hover:bg-cyan-400/[0.07]'
                     }`}
                   >
                     <button
@@ -276,18 +276,18 @@ export function ProfileOnboardingModal({
         )}
 
         {/* Username + Password Sign In / Create Account Form */}
-        <div className="mt-5 border-t border-white/[0.08] pt-4">
-          <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/[0.08] bg-[#090C18] p-1">
+        <div className="mt-5 border-t border-cyan-200/[0.1] pt-4">
+          <div className="grid grid-cols-2 gap-1 rounded-lg border border-cyan-200/15 bg-[#040814]/85 p-1">
             <button
               type="button"
               onClick={() => {
                 setAuthTab('login');
                 setError(null);
               }}
-              className={`flex cursor-pointer items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors ${
+              className={`flex cursor-pointer items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-all ${
                 authTab === 'login'
-                  ? 'bg-amber-400 text-slate-950'
-                  : 'text-slate-400 hover:text-slate-100'
+                  ? 'bio-btn-primary font-semibold'
+                  : 'text-slate-400 hover:text-cyan-100'
               }`}
             >
               <LogIn className="h-3.5 w-3.5" />
@@ -299,10 +299,10 @@ export function ProfileOnboardingModal({
                 setAuthTab('register');
                 setError(null);
               }}
-              className={`flex cursor-pointer items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors ${
+              className={`flex cursor-pointer items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-all ${
                 authTab === 'register'
-                  ? 'bg-amber-400 text-slate-950'
-                  : 'text-slate-400 hover:text-slate-100'
+                  ? 'bio-btn-primary font-semibold'
+                  : 'text-slate-400 hover:text-cyan-100'
               }`}
             >
               <UserPlus className="h-3.5 w-3.5" />
@@ -325,7 +325,7 @@ export function ProfileOnboardingModal({
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="e.g. Ayesha"
-                className="mt-1 w-full rounded-lg border border-white/10 bg-[#0B0E1A] px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
+                className="bio-input mt-1 w-full rounded-lg px-3.5 py-2 text-sm placeholder:text-slate-500"
               />
             </div>
 
@@ -343,7 +343,7 @@ export function ProfileOnboardingModal({
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="At least 4 characters"
-                  className="w-full rounded-lg border border-white/10 bg-[#0B0E1A] px-3.5 py-2 pr-9 text-sm text-slate-100 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
+                  className="bio-input w-full rounded-lg px-3.5 py-2 pr-9 text-sm placeholder:text-slate-500"
                 />
                 <KeyRound className="pointer-events-none absolute right-3 top-2.5 h-4 w-4 text-slate-500" />
               </div>
@@ -365,7 +365,7 @@ export function ProfileOnboardingModal({
             <button
               type="submit"
               disabled={isSubmitting || !username.trim() || password.length < 4}
-              className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-amber-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition-colors hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-45"
+              className="bio-btn-primary flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-45"
             >
               {isSubmitting
                 ? 'Please wait...'

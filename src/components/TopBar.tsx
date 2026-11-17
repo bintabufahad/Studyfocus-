@@ -24,75 +24,74 @@ export function TopBar({
   logsCount,
 }: TopBarProps) {
   return (
-    <header className="relative z-20 mx-auto flex w-full max-w-[1440px] shrink-0 items-center justify-between gap-4 border-b border-white/[0.07] px-4 py-2 sm:px-6 lg:gap-8 lg:px-8">
-      {/* Zone 1: Single-element brand wordmark */}
+    <header className="fp-topbar relative z-20 mx-auto flex w-full shrink-0 items-center justify-between gap-4 px-5 py-2.5 sm:px-8">
+      {/* Left: Crisp FocusPair wordmark */}
       <button
         type="button"
         onClick={() => onSelectView('hub')}
-        className="font-display cursor-pointer text-lg font-semibold tracking-tight text-slate-100 transition-colors hover:text-amber-300 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400"
+        className="font-display cursor-pointer text-base font-semibold tracking-tight text-slate-100 transition-colors hover:text-cyan-200 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-300"
       >
         FocusPair
       </button>
 
-      {/* Zone 2: Concise single-line navigation links */}
-      <nav aria-label="Primary" className="flex items-center gap-4 sm:gap-6 lg:gap-8">
-        <button
-          type="button"
-          onClick={() => onSelectView('hub')}
-          className={`cursor-pointer text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400 ${
-            activeView === 'hub'
-              ? 'text-amber-300 underline decoration-amber-400/60 underline-offset-8'
-              : 'text-slate-400 hover:text-slate-100'
-          }`}
-        >
-          Sessions
-        </button>
-
-        {activeCardTitle && (
+      {/* Right: Concise single-line navigation links + workspace action when inside a session */}
+      <div className="flex items-center gap-5 sm:gap-7">
+        <nav aria-label="Primary" className="flex items-center gap-4 sm:gap-6">
           <button
             type="button"
-            onClick={() => onSelectView('workspace')}
-            className={`cursor-pointer max-w-[140px] truncate text-sm font-medium transition-colors whitespace-nowrap shrink-0 sm:max-w-[180px] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400 ${
-              activeView === 'workspace'
-                ? 'text-amber-300 underline decoration-amber-400/60 underline-offset-8'
-                : 'text-slate-400 hover:text-slate-100'
+            onClick={() => onSelectView('hub')}
+            className={`cursor-pointer text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-300 ${
+              activeView === 'hub'
+                ? 'text-cyan-300 underline decoration-cyan-300 decoration-2 underline-offset-8 drop-shadow-[0_0_8px_rgba(103,232,249,0.5)]'
+                : 'text-slate-300/80 hover:text-cyan-100'
             }`}
           >
-            {activeCardTitle}
+            Sessions
           </button>
-        )}
 
-        <button
-          type="button"
-          onClick={() => onSelectView('history')}
-          className={`cursor-pointer text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400 ${
-            activeView === 'history'
-              ? 'text-amber-300 underline decoration-amber-400/60 underline-offset-8'
-              : 'text-slate-400 hover:text-slate-100'
-          }`}
-        >
-          History{logsCount > 0 ? ` (${logsCount})` : ''}
-        </button>
+          {activeCardTitle && (
+            <button
+              type="button"
+              onClick={() => onSelectView('workspace')}
+              className={`cursor-pointer max-w-[140px] truncate text-sm font-medium transition-colors whitespace-nowrap shrink-0 sm:max-w-[180px] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-300 ${
+                activeView === 'workspace'
+                  ? 'text-cyan-300 underline decoration-cyan-300 decoration-2 underline-offset-8 drop-shadow-[0_0_8px_rgba(103,232,249,0.5)]'
+                  : 'text-slate-300/80 hover:text-cyan-100'
+              }`}
+            >
+              {activeCardTitle}
+            </button>
+          )}
 
-        <button
-          type="button"
-          onClick={onOpenProfiles}
-          className="cursor-pointer text-sm font-medium text-slate-400 transition-colors hover:text-slate-100 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400"
-        >
-          Account: {profileName}
-        </button>
-      </nav>
+          <button
+            type="button"
+            onClick={() => onSelectView('history')}
+            className={`cursor-pointer text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-300 ${
+              activeView === 'history'
+                ? 'text-cyan-300 underline decoration-cyan-300 decoration-2 underline-offset-8 drop-shadow-[0_0_8px_rgba(103,232,249,0.5)]'
+                : 'text-slate-300/80 hover:text-cyan-100'
+            }`}
+          >
+            History{logsCount > 0 ? ` (${logsCount})` : ''}
+          </button>
 
-      {/* Zone 3: One primary action */}
-      <div className="flex items-center shrink-0">
+          <button
+            type="button"
+            onClick={onOpenProfiles}
+            className="cursor-pointer text-sm font-medium text-amber-200 transition-colors hover:text-amber-100 whitespace-nowrap shrink-0 drop-shadow-[0_0_10px_rgba(251,191,36,0.35)] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300"
+          >
+            Account: {profileName}
+          </button>
+        </nav>
+
         {activeView === 'workspace' && activeCardTitle ? (
           <button
             type="button"
             onClick={onToggleFocus}
-            className={`cursor-pointer rounded-lg px-4 py-1.5 text-sm font-medium transition-all duration-150 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400 ${
+            className={`cursor-pointer rounded-lg px-4 py-1.5 text-sm font-semibold transition-all duration-150 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 ${
               isFocusRunning
-                ? 'border border-amber-400/40 bg-amber-400/15 text-amber-200 hover:bg-amber-400/25'
-                : 'bg-amber-400 text-slate-950 shadow-[0_0_24px_rgba(251,191,36,0.22)] hover:bg-amber-300'
+                ? 'bio-glow-chip border hover:brightness-110'
+                : 'bio-btn-primary'
             }`}
           >
             {isFocusRunning
@@ -105,19 +104,11 @@ export function TopBar({
           <button
             type="button"
             onClick={() => onSelectView('workspace')}
-            className="cursor-pointer rounded-lg bg-amber-400 px-4 py-1.5 text-sm font-medium text-slate-950 shadow-[0_0_24px_rgba(251,191,36,0.22)] transition-all duration-150 hover:bg-amber-300 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400"
+            className="bio-btn-primary cursor-pointer rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-all duration-150 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
           >
             Resume Session
           </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => onSelectView('hub')}
-            className="cursor-pointer rounded-lg border border-white/10 bg-white/[0.06] px-4 py-1.5 text-sm font-medium text-slate-200 transition-colors hover:bg-white/10 whitespace-nowrap shrink-0"
-          >
-            Create Card
-          </button>
-        )}
+        ) : null}
       </div>
     </header>
   );

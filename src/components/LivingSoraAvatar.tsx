@@ -117,7 +117,7 @@ export function LivingSoraAvatar({
   const mouthHalfW = 10.2 - effectiveOpen * 1.8;
 
   return (
-    <div className="relative aspect-[16/9] max-h-[170px] w-full overflow-hidden bg-[#090D1B] lg:max-h-[198px]">
+    <div className="relative aspect-[16/9] max-h-[170px] w-full overflow-hidden bg-[#040711] lg:max-h-[198px]">
       <svg
         viewBox="0 0 640 360"
         className="h-full w-full select-none object-cover"
@@ -564,13 +564,13 @@ export function LivingSoraAvatar({
       </svg>
 
       {/* Measured Bottom Scrim + Live Speech Caption */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-[#090B14]/95 via-[#090B14]/55 to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-[#040711]/95 via-[#040711]/55 to-transparent" />
 
       <div className="absolute inset-x-3.5 top-2.5 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-xs font-medium text-slate-200/90 drop-shadow">
           <span>Sora</span>
           <span aria-hidden="true" className="text-slate-400">·</span>
-          <span className="text-slate-300">
+          <span className="text-cyan-100/85">
             {isSpeaking
               ? 'Speaking'
               : isListening
@@ -586,7 +586,7 @@ export function LivingSoraAvatar({
         {(isSpeaking || isListening) && (
           <div
             aria-label="Voice activity"
-            className="flex h-5 items-center gap-1 rounded bg-black/45 px-2 backdrop-blur-md"
+            className="flex h-5 items-center gap-1 rounded bg-[#040711]/65 px-2 backdrop-blur-md"
           >
             {[0.4, 0.85, 1, 0.7, 0.45].map((w, i) => {
               const barScale = isSpeaking
@@ -597,7 +597,7 @@ export function LivingSoraAvatar({
                   key={i}
                   style={{ transform: `scaleY(${Math.min(1, barScale)})` }}
                   className={`h-3.5 w-0.5 origin-center rounded-full transition-transform duration-75 ${
-                    isSpeaking ? 'bg-amber-400' : 'bg-sky-300'
+                    isSpeaking ? 'bg-amber-300' : 'bg-cyan-300'
                   }`}
                 />
               );

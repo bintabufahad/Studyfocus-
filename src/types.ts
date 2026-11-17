@@ -30,18 +30,33 @@ export interface ChatMessage {
 }
 
 export interface TaskAction {
-  action: 'add_task' | 'add_subtasks' | 'toggle_task' | 'set_focus';
+  action:
+    | 'add_task'
+    | 'edit_task'
+    | 'delete_task'
+    | 'add_subtasks'
+    | 'toggle_task'
+    | 'set_focus';
   taskId?: string;
   title?: string;
+  newTitle?: string;
   estimatedMinutes?: number;
   subtasks?: string[];
+}
+
+export interface TimerControlAction {
+  timer: 'focus' | 'break' | 'checkin';
+  action: 'start' | 'pause' | 'stop' | 'reset';
+  minutes?: number;
 }
 
 export interface PlaylistItem {
   id: string;
   title: string;
   url: string;
-  sourceType: 'youtube' | 'direct' | 'local';
+  sourceType: 'youtube' | 'youtube_playlist' | 'direct' | 'local';
+  playlistId?: string;
+  durationSeconds?: number;
   addedAt: number;
 }
 
@@ -78,6 +93,8 @@ export interface StudySessionCard {
   tasks: TaskItem[];
   playlist: PlaylistItem[];
   activeVideoId: string | null;
+  videoTrimIntroSeconds?: number;
+  videoTrimOutroSeconds?: number;
   timerSettings: TimerSettings;
   sessionLogs: SessionLog[];
 }
@@ -97,13 +114,16 @@ export interface UserProfile {
 export interface ActiveTimerSnapshot {
   profileId: string;
   cardId: string;
-  sprintPhase: SprintPhase;
   isFocusRunning: boolean;
-  phaseEndAt: number | null;
-  pausedRemainingSeconds: number;
+  focusEndAt: number | null;
+  focusRemainingSeconds: number;
+  isBreakRunning: boolean;
+  breakEndAt: number | null;
+  breakRemainingSeconds: number;
+  isCheckInRunning: boolean;
+  checkInEndAt: number | null;
+  checkInRemainingSeconds: number;
   elapsedSessionSeconds: number;
-  alertEnabled: boolean;
-  nextAlertAt: number | null;
   checkInMinutes: number;
   updatedAt: number;
 }
@@ -119,7 +139,7 @@ export interface RoomParticipant {
 export interface SharedVideoState {
   videoUrl: string;
   videoTitle: string;
-  sourceType: 'youtube' | 'direct';
+  sourceType: 'youtube' | 'youtube_playlist' | 'direct';
   isPlaying: boolean;
   currentTime: number;
   updatedAt: number;

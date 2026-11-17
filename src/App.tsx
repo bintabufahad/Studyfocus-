@@ -20,6 +20,7 @@ import type {
   StudySessionCard,
   TaskAction,
   TaskItem,
+  TimerControlAction,
   TimerSettings,
   UserProfile,
   WorkspacePanelMode,
@@ -50,9 +51,9 @@ function makeId(prefix = 'id'): string {
 
 function buildSessionOpeningQuestion(name: string, cardTitle: string, hasTasks: boolean): string {
   if (hasTasks) {
-    return `Hey ${name}, welcome back to ${cardTitle}. Tap Talk Live or start your timer whenever you're ready.`;
+    return `Hey ${name}, welcome back to ${cardTitle}. Tap Talk Live or start a timer whenever you're ready.`;
   }
-  return `Hey ${name}! What are we working on in ${cardTitle}? Tap Talk Live to tell me & set check-ins, or add tasks on the right.`;
+  return `Hey ${name}! What are we working on in ${cardTitle}? Tap Talk Live to tell me, or add tasks on the right.`;
 }
 
 function parseInitialRoomInvite(): { roomId: string; title: string } | null {
@@ -97,6 +98,11 @@ function parseRoomInviteInput(raw: string): { roomId: string; title?: string } |
   const normalized = trimmed.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 64);
   return normalized ? { roomId: normalized } : null;
 }
+
+type StagedVoiceStart = {
+  timer: 'focus' | 'break' | 'checkin';
+  minutes?: number;
+};
 
 export default function App() {
   const initialInviteRef = useRef(parseInitialRoomInvite());
@@ -163,24 +169,34 @@ export default function App() {
   const [isSimulatingSpeech, setIsSimulatingSpeech] = useState(false);
   const speechSimTimerRef = useRef<number | null>(null);
 
-  // Wall-clock anchored Sprint & Break Timer State
-  const [sprintPhase, setSprintPhase] = useState<SprintPhase>('work');
+  // 1. Focus Timer State (wall-clock anchored)
   const [isFocusRunning, setIsFocusRunning] = useState(false);
-  const [phaseRemainingSeconds, setPhaseRemainingSeconds] = useState(
+  const [focusRemainingSeconds, setFocusRemainingSeconds] = useState(
     () => DEFAULT_TIMER_SETTINGS.workMinutes * 60
   );
-  const [elapsedSessionSeconds, setElapsedSessionSeconds] = useState(0);
-  const phaseEndAtRef = useRef<number | null>(null);
-  const elapsedBaseRef = useRef<number>(0);
-  const runningSinceRef = useRef<number | null>(null);
-  const reminderFiredRef = useRef<boolean>(false);
+  const focusEndAtRef = useRef<number | null>(null);
+  const focusReminderFiredRef = useRef<boolean>(false);
 
-  // Wall-clock anchored Automatic Check-In Timer (survives app tab & browser tab switches)
-  const [alertEnabled, setAlertEnabled] = useState(true);
+  // 2. Break Timer State (wall-clock anchored; starting Break auto-stops Focus & Check-in)
+  const [isBreakRunning, setIsBreakRunning] = useState(false);
+  const [breakRemainingSeconds, setBreakRemainingSeconds] = useState(
+    () => DEFAULT_TIMER_SETTINGS.breakMinutes * 60
+  );
+  const breakEndAtRef = useRef<number | null>(null);
+  const breakReminderFiredRef = useRef<boolean>(false);
+
+  // 3. Check-In Timer State (OFF by default until user explicitly grants permission / starts)
+  const [isCheckInRunning, setIsCheckInRunning] = useState(false);
+  const [isCheckInStaged, setIsCheckInStaged] = useState(false);
   const [secondsUntilAlert, setSecondsUntilAlert] = useState(
     () => DEFAULT_TIMER_SETTINGS.checkInMinutes * 60
   );
   const nextAlertAtRef = useRef<number | null>(null);
+
+  // Cumulative focus session elapsed tracker
+  const [elapsedSessionSeconds, setElapsedSessionSeconds] = useState(0);
+  const elapsedBaseRef = useRef<number>(0);
+  const runningSinceRef = useRef<number | null>(null);
 
   const [activeAlertBanner, setActiveAlertBanner] = useState<{
     kind: 'sprint_end' | 'break_end' | 'reminder' | 'checkin';
@@ -189,14 +205,17 @@ export default function App() {
   } | null>(null);
   const [isLoadingCheckIn, setIsLoadingCheckIn] = useState(false);
 
-  // Live Voice Transcripts
+  // Live Voice Transcripts + Speak-Before-Timer-Starts Queue
   const [liveDraftUserText, setLiveDraftUserText] = useState('');
   const [liveDraftAssistantText, setLiveDraftAssistantText] = useState('');
   const liveUserBufRef = useRef('');
   const liveAssistantBufRef = useRef('');
   const sessionStartTimeRef = useRef<number>(Date.now());
+  const stagedVoiceStartsRef = useRef<StagedVoiceStart[]>([]);
+  const stagedSafetyTimerRef = useRef<number | null>(null);
+  const turnCompleteAwaitingAudioRef = useRef(false);
 
-  // Always-fresh refs for timers/callbacks so check-ins & visibility resync never read stale state
+  // Always-fresh refs for timers & callbacks
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
   const activeCardRef = useRef(activeCard);
@@ -211,12 +230,16 @@ export default function App() {
   profileNameRef.current = profileName;
   const isFocusRunningRef = useRef(isFocusRunning);
   isFocusRunningRef.current = isFocusRunning;
-  const alertEnabledRef = useRef(alertEnabled);
-  alertEnabledRef.current = alertEnabled;
-  const sprintPhaseRef = useRef(sprintPhase);
-  sprintPhaseRef.current = sprintPhase;
-  const phaseRemainingRef = useRef(phaseRemainingSeconds);
-  phaseRemainingRef.current = phaseRemainingSeconds;
+  const focusRemainingRef = useRef(focusRemainingSeconds);
+  focusRemainingRef.current = focusRemainingSeconds;
+  const isBreakRunningRef = useRef(isBreakRunning);
+  isBreakRunningRef.current = isBreakRunning;
+  const breakRemainingRef = useRef(breakRemainingSeconds);
+  breakRemainingRef.current = breakRemainingSeconds;
+  const isCheckInRunningRef = useRef(isCheckInRunning);
+  isCheckInRunningRef.current = isCheckInRunning;
+  const secondsUntilAlertRef = useRef(secondsUntilAlert);
+  secondsUntilAlertRef.current = secondsUntilAlert;
 
   const suppressNextCloudPushRef = useRef(false);
   const hasUnsyncedCloudRef = useRef(false);
@@ -244,7 +267,6 @@ export default function App() {
     saveAuthToken(authToken);
   }, [authToken]);
 
-  // Restore active cloud account on launch & refresh when switching back between browsers
   const pullCloudAccount = useCallback(
     async (token: string, forceReplace = false) => {
       const account = await fetchCurrentAccount(token);
@@ -286,7 +308,6 @@ export default function App() {
     void pullCloudAccount(authToken, true);
   }, [authToken, pullCloudAccount]);
 
-  // Debounced auto-sync of cloud account study cards across browsers
   const cloudSyncPayload = activeProfile?.isCloudAccount ? activeProfile.studyCards : null;
   useEffect(() => {
     if (!authToken || !cloudSyncPayload) return;
@@ -309,7 +330,6 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [authToken, cloudSyncPayload]);
 
-  // Flush pending cloud sync on pagehide & pull updates when returning to browser window
   useEffect(() => {
     const handlePageHide = () => {
       if (authToken && activeProfile?.isCloudAccount && hasUnsyncedCloudRef.current) {
@@ -367,13 +387,16 @@ export default function App() {
   const persistActiveTimerSnapshot = useCallback(
     (overrides?: {
       cardId?: string | null;
-      sprintPhase?: SprintPhase;
       isFocusRunning?: boolean;
-      phaseEndAt?: number | null;
-      pausedRemainingSeconds?: number;
+      focusEndAt?: number | null;
+      focusRemainingSeconds?: number;
+      isBreakRunning?: boolean;
+      breakEndAt?: number | null;
+      breakRemainingSeconds?: number;
+      isCheckInRunning?: boolean;
+      checkInEndAt?: number | null;
+      checkInRemainingSeconds?: number;
       elapsedSessionSeconds?: number;
-      alertEnabled?: boolean;
-      nextAlertAt?: number | null;
       checkInMinutes?: number;
     }) => {
       const targetCardId =
@@ -385,17 +408,23 @@ export default function App() {
       saveTimerSnapshot({
         profileId: activeProfileId,
         cardId: targetCardId,
-        sprintPhase: overrides?.sprintPhase ?? sprintPhaseRef.current,
         isFocusRunning: overrides?.isFocusRunning ?? isFocusRunningRef.current,
-        phaseEndAt:
-          overrides?.phaseEndAt !== undefined ? overrides.phaseEndAt : phaseEndAtRef.current,
-        pausedRemainingSeconds:
-          overrides?.pausedRemainingSeconds ?? phaseRemainingRef.current,
+        focusEndAt:
+          overrides?.focusEndAt !== undefined ? overrides.focusEndAt : focusEndAtRef.current,
+        focusRemainingSeconds:
+          overrides?.focusRemainingSeconds ?? focusRemainingRef.current,
+        isBreakRunning: overrides?.isBreakRunning ?? isBreakRunningRef.current,
+        breakEndAt:
+          overrides?.breakEndAt !== undefined ? overrides.breakEndAt : breakEndAtRef.current,
+        breakRemainingSeconds:
+          overrides?.breakRemainingSeconds ?? breakRemainingRef.current,
+        isCheckInRunning: overrides?.isCheckInRunning ?? isCheckInRunningRef.current,
+        checkInEndAt:
+          overrides?.checkInEndAt !== undefined ? overrides.checkInEndAt : nextAlertAtRef.current,
+        checkInRemainingSeconds:
+          overrides?.checkInRemainingSeconds ?? secondsUntilAlertRef.current,
         elapsedSessionSeconds:
           overrides?.elapsedSessionSeconds ?? elapsedSecondsRef.current,
-        alertEnabled: overrides?.alertEnabled ?? alertEnabledRef.current,
-        nextAlertAt:
-          overrides?.nextAlertAt !== undefined ? overrides.nextAlertAt : nextAlertAtRef.current,
         checkInMinutes:
           overrides?.checkInMinutes ?? timerSettingsRef.current.checkInMinutes,
         updatedAt: Date.now(),
@@ -404,36 +433,297 @@ export default function App() {
     [activeProfileId]
   );
 
-  const applyCheckInPreference = useCallback(
-    (enabled: boolean, intervalMinutes?: number) => {
+  // Unified Three-Timer Control (Enforces: Starting Break stops Focus + Check-in; Starting Focus stops Break)
+  const executeTimerAction = useCallback(
+    (act: TimerControlAction) => {
+      const now = Date.now();
       const clampedMins =
-        typeof intervalMinutes === 'number' && !Number.isNaN(intervalMinutes)
-          ? Math.max(1, Math.min(180, Math.round(intervalMinutes)))
-          : timerSettingsRef.current.checkInMinutes;
+        typeof act.minutes === 'number' && Number.isFinite(act.minutes) && act.minutes > 0
+          ? Math.max(1, Math.min(180, Math.round(act.minutes)))
+          : undefined;
 
-      setAlertEnabled(enabled);
-      if (typeof intervalMinutes === 'number' && !Number.isNaN(intervalMinutes)) {
-        updateActiveCard((card) => ({
-          ...card,
-          timerSettings: { ...card.timerSettings, checkInMinutes: clampedMins },
-        }));
+      if (act.timer === 'focus') {
+        const targetMins = clampedMins ?? timerSettingsRef.current.workMinutes;
+        if (clampedMins !== undefined) {
+          updateActiveCard((c) => ({
+            ...c,
+            timerSettings: { ...c.timerSettings, workMinutes: clampedMins },
+          }));
+        }
+
+        if (act.action === 'start') {
+          // Stop Break if running
+          if (isBreakRunningRef.current) {
+            const breakRem = breakEndAtRef.current
+              ? Math.max(0, Math.ceil((breakEndAtRef.current - now) / 1000))
+              : breakRemainingRef.current;
+            breakEndAtRef.current = null;
+            setIsBreakRunning(false);
+            setBreakRemainingSeconds(breakRem);
+          }
+
+          if (elapsedSecondsRef.current === 0) {
+            sessionStartTimeRef.current = now;
+          }
+          const startSec =
+            clampedMins !== undefined
+              ? targetMins * 60
+              : focusRemainingRef.current > 0
+                ? focusRemainingRef.current
+                : targetMins * 60;
+          const endAt = now + startSec * 1000;
+          focusEndAtRef.current = endAt;
+          elapsedBaseRef.current = elapsedSecondsRef.current;
+          runningSinceRef.current = now;
+          focusReminderFiredRef.current = false;
+          setFocusRemainingSeconds(startSec);
+          setIsFocusRunning(true);
+          setPose('typing');
+          setCompanionCaption((caption) =>
+            caption.includes('What are we working on')
+              ? "Focus started — I'm studying quietly beside you."
+              : caption
+          );
+          persistActiveTimerSnapshot({
+            isFocusRunning: true,
+            focusEndAt: endAt,
+            focusRemainingSeconds: startSec,
+            isBreakRunning: false,
+            breakEndAt: null,
+          });
+        } else if (act.action === 'pause' || act.action === 'stop') {
+          const rem = focusEndAtRef.current
+            ? Math.max(0, Math.ceil((focusEndAtRef.current - now) / 1000))
+            : focusRemainingRef.current;
+          const totalElapsed = runningSinceRef.current
+            ? elapsedBaseRef.current + Math.max(0, Math.floor((now - runningSinceRef.current) / 1000))
+            : elapsedSecondsRef.current;
+          focusEndAtRef.current = null;
+          runningSinceRef.current = null;
+          elapsedBaseRef.current = totalElapsed;
+          setIsFocusRunning(false);
+          setFocusRemainingSeconds(act.action === 'stop' ? targetMins * 60 : rem);
+          setElapsedSessionSeconds(totalElapsed);
+          setPose('coffee');
+          persistActiveTimerSnapshot({
+            isFocusRunning: false,
+            focusEndAt: null,
+            focusRemainingSeconds: act.action === 'stop' ? targetMins * 60 : rem,
+            elapsedSessionSeconds: totalElapsed,
+          });
+        } else if (act.action === 'reset') {
+          const resetSec = targetMins * 60;
+          focusEndAtRef.current = null;
+          runningSinceRef.current = null;
+          focusReminderFiredRef.current = false;
+          setIsFocusRunning(false);
+          setFocusRemainingSeconds(resetSec);
+          setPose('coffee');
+          persistActiveTimerSnapshot({
+            isFocusRunning: false,
+            focusEndAt: null,
+            focusRemainingSeconds: resetSec,
+          });
+        }
+        return;
       }
 
-      const nextTarget = enabled ? Date.now() + clampedMins * 60_000 : null;
-      nextAlertAtRef.current = nextTarget;
-      setSecondsUntilAlert(clampedMins * 60);
-      persistActiveTimerSnapshot({
-        alertEnabled: enabled,
-        nextAlertAt: nextTarget,
-        checkInMinutes: clampedMins,
-      });
+      if (act.timer === 'break') {
+        const targetMins = clampedMins ?? timerSettingsRef.current.breakMinutes;
+        if (clampedMins !== undefined) {
+          updateActiveCard((c) => ({
+            ...c,
+            timerSettings: { ...c.timerSettings, breakMinutes: clampedMins },
+          }));
+        }
+
+        if (act.action === 'start') {
+          // Rule: Starting Break automatically stops Focus AND Check-in
+          const focusRem = focusEndAtRef.current
+            ? Math.max(0, Math.ceil((focusEndAtRef.current - now) / 1000))
+            : focusRemainingRef.current;
+          const totalElapsed = runningSinceRef.current
+            ? elapsedBaseRef.current + Math.max(0, Math.floor((now - runningSinceRef.current) / 1000))
+            : elapsedSecondsRef.current;
+
+          focusEndAtRef.current = null;
+          runningSinceRef.current = null;
+          elapsedBaseRef.current = totalElapsed;
+          setIsFocusRunning(false);
+          setFocusRemainingSeconds(focusRem);
+          setElapsedSessionSeconds(totalElapsed);
+
+          // Also stop Check-in timer cleanly
+          stagedVoiceStartsRef.current = stagedVoiceStartsRef.current.filter(
+            (s) => s.timer !== 'checkin'
+          );
+          setIsCheckInStaged(false);
+          nextAlertAtRef.current = null;
+          setIsCheckInRunning(false);
+
+          const startSec =
+            clampedMins !== undefined
+              ? targetMins * 60
+              : breakRemainingRef.current > 0
+                ? breakRemainingRef.current
+                : targetMins * 60;
+          const endAt = now + startSec * 1000;
+          breakEndAtRef.current = endAt;
+          breakReminderFiredRef.current = false;
+          setBreakRemainingSeconds(startSec);
+          setIsBreakRunning(true);
+          setPose('coffee');
+          persistActiveTimerSnapshot({
+            isFocusRunning: false,
+            focusEndAt: null,
+            focusRemainingSeconds: focusRem,
+            isBreakRunning: true,
+            breakEndAt: endAt,
+            breakRemainingSeconds: startSec,
+            isCheckInRunning: false,
+            checkInEndAt: null,
+            elapsedSessionSeconds: totalElapsed,
+          });
+        } else if (act.action === 'pause' || act.action === 'stop') {
+          const rem = breakEndAtRef.current
+            ? Math.max(0, Math.ceil((breakEndAtRef.current - now) / 1000))
+            : breakRemainingRef.current;
+          breakEndAtRef.current = null;
+          setIsBreakRunning(false);
+          setBreakRemainingSeconds(act.action === 'stop' ? targetMins * 60 : rem);
+          persistActiveTimerSnapshot({
+            isBreakRunning: false,
+            breakEndAt: null,
+            breakRemainingSeconds: act.action === 'stop' ? targetMins * 60 : rem,
+          });
+        } else if (act.action === 'reset') {
+          const resetSec = targetMins * 60;
+          breakEndAtRef.current = null;
+          breakReminderFiredRef.current = false;
+          setIsBreakRunning(false);
+          setBreakRemainingSeconds(resetSec);
+          persistActiveTimerSnapshot({
+            isBreakRunning: false,
+            breakEndAt: null,
+            breakRemainingSeconds: resetSec,
+          });
+        }
+        return;
+      }
+
+      if (act.timer === 'checkin') {
+        const targetMins = clampedMins ?? timerSettingsRef.current.checkInMinutes;
+        if (clampedMins !== undefined) {
+          updateActiveCard((c) => ({
+            ...c,
+            timerSettings: { ...c.timerSettings, checkInMinutes: clampedMins },
+          }));
+        }
+
+        if (act.action === 'start') {
+          // If Break is currently running and user explicitly starts Check-in, keep behavior crisp
+          const nextTarget = now + targetMins * 60_000;
+          nextAlertAtRef.current = nextTarget;
+          setSecondsUntilAlert(targetMins * 60);
+          setIsCheckInRunning(true);
+          setIsCheckInStaged(false);
+          persistActiveTimerSnapshot({
+            isCheckInRunning: true,
+            checkInEndAt: nextTarget,
+            checkInRemainingSeconds: targetMins * 60,
+            checkInMinutes: targetMins,
+          });
+        } else {
+          // pause / stop / reset -> stop check-in cleanly
+          stagedVoiceStartsRef.current = stagedVoiceStartsRef.current.filter(
+            (s) => s.timer !== 'checkin'
+          );
+          setIsCheckInStaged(false);
+          nextAlertAtRef.current = null;
+          setIsCheckInRunning(false);
+          setSecondsUntilAlert(targetMins * 60);
+          persistActiveTimerSnapshot({
+            isCheckInRunning: false,
+            checkInEndAt: null,
+            checkInRemainingSeconds: targetMins * 60,
+            checkInMinutes: targetMins,
+          });
+        }
+      }
     },
     [persistActiveTimerSnapshot, updateActiveCard]
   );
 
+  const flushStagedVoiceStarts = useCallback(() => {
+    if (stagedSafetyTimerRef.current) {
+      window.clearTimeout(stagedSafetyTimerRef.current);
+      stagedSafetyTimerRef.current = null;
+    }
+    const pending = stagedVoiceStartsRef.current;
+    if (pending.length === 0) return;
+    stagedVoiceStartsRef.current = [];
+    setIsCheckInStaged(false);
+    for (const item of pending) {
+      executeTimerAction({ timer: item.timer, action: 'start', minutes: item.minutes });
+    }
+  }, [executeTimerAction]);
+
+  // Stage a voice-initiated timer start so Sora finishes speaking ("Now your check-in starts") BEFORE the clock starts ticking
+  const stageVoiceTimerStart = useCallback(
+    (timer: 'focus' | 'break' | 'checkin', minutes?: number) => {
+      const clampedMins =
+        typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0
+          ? Math.max(1, Math.min(180, Math.round(minutes)))
+          : undefined;
+
+      // Update displayed duration immediately while waiting for Sora's sentence to finish
+      if (clampedMins !== undefined) {
+        updateActiveCard((c) => ({
+          ...c,
+          timerSettings: {
+            ...c.timerSettings,
+            ...(timer === 'focus'
+              ? { workMinutes: clampedMins }
+              : timer === 'break'
+                ? { breakMinutes: clampedMins }
+                : { checkInMinutes: clampedMins }),
+          },
+        }));
+        if (timer === 'focus') setFocusRemainingSeconds(clampedMins * 60);
+        if (timer === 'break') setBreakRemainingSeconds(clampedMins * 60);
+        if (timer === 'checkin') setSecondsUntilAlert(clampedMins * 60);
+      }
+
+      // Immediately stop conflicting timers when Break is requested
+      if (timer === 'break') {
+        executeTimerAction({ timer: 'focus', action: 'pause' });
+        executeTimerAction({ timer: 'checkin', action: 'stop' });
+      } else if (timer === 'focus') {
+        executeTimerAction({ timer: 'break', action: 'pause' });
+      }
+
+      if (timer === 'checkin') {
+        setIsCheckInStaged(true);
+      }
+
+      // Replace any previous staged start for the same timer
+      stagedVoiceStartsRef.current = [
+        ...stagedVoiceStartsRef.current.filter((s) => s.timer !== timer),
+        { timer, minutes: clampedMins },
+      ];
+
+      if (stagedSafetyTimerRef.current) {
+        window.clearTimeout(stagedSafetyTimerRef.current);
+      }
+      stagedSafetyTimerRef.current = window.setTimeout(() => {
+        flushStagedVoiceStarts();
+      }, 3600);
+    },
+    [executeTimerAction, flushStagedVoiceStarts, updateActiveCard]
+  );
+
   const openStudyCard = useCallback(
     (card: StudySessionCard) => {
-      // If returning to the currently active card (e.g. from Sessions or History), keep running timers intact!
       if (activeCardRef.current?.id === card.id) {
         setActiveView('workspace');
         return;
@@ -444,85 +734,104 @@ export default function App() {
       setPanelMode('focus');
       setActiveTaskId(card.tasks.find((t) => !t.completed)?.id ?? null);
       setActiveAlertBanner(null);
+      stagedVoiceStartsRef.current = [];
+      setIsCheckInStaged(false);
 
-      // Restore unexpired running timer snapshot for this card if present
       const snap = loadTimerSnapshot();
       if (snap && snap.cardId === card.id && snap.profileId === activeProfileId) {
         const now = Date.now();
-        const restoredPhase = snap.sprintPhase;
-        let restoredRunning = snap.isFocusRunning;
-        let restoredRem = snap.pausedRemainingSeconds;
-        let restoredPhaseEndAt = snap.phaseEndAt;
 
-        if (restoredRunning && restoredPhaseEndAt) {
-          const left = Math.ceil((restoredPhaseEndAt - now) / 1000);
-          if (left > 0) {
-            restoredRem = left;
-          } else {
-            restoredRunning = false;
-            restoredPhaseEndAt = null;
-            restoredRem =
-              (restoredPhase === 'work'
-                ? card.timerSettings.workMinutes
-                : card.timerSettings.breakMinutes) * 60;
+        let restFocusRun = snap.isFocusRunning;
+        let restFocusRem = snap.focusRemainingSeconds;
+        let restFocusEnd = snap.focusEndAt;
+        if (restFocusRun && restFocusEnd) {
+          const left = Math.ceil((restFocusEnd - now) / 1000);
+          if (left > 0) restFocusRem = left;
+          else {
+            restFocusRun = false;
+            restFocusEnd = null;
+            restFocusRem = card.timerSettings.workMinutes * 60;
           }
         }
 
-        const restoredAlertEnabled = snap.alertEnabled;
+        let restBreakRun = snap.isBreakRunning;
+        let restBreakRem = snap.breakRemainingSeconds;
+        let restBreakEnd = snap.breakEndAt;
+        if (restBreakRun && restBreakEnd) {
+          const left = Math.ceil((restBreakEnd - now) / 1000);
+          if (left > 0) restBreakRem = left;
+          else {
+            restBreakRun = false;
+            restBreakEnd = null;
+            restBreakRem = card.timerSettings.breakMinutes * 60;
+          }
+        }
+
+        const restCheckInRun = Boolean(snap.isCheckInRunning) && !restBreakRun;
+        let restCheckInEnd = snap.checkInEndAt;
         const intervalMs = Math.max(1, card.timerSettings.checkInMinutes) * 60_000;
-        let restoredNextAlert = snap.nextAlertAt;
-        if (restoredAlertEnabled) {
-          if (!restoredNextAlert || restoredNextAlert <= now) {
-            restoredNextAlert = now + intervalMs;
+        if (restCheckInRun) {
+          if (!restCheckInEnd || restCheckInEnd <= now) {
+            restCheckInEnd = now + intervalMs;
           }
         } else {
-          restoredNextAlert = null;
+          restCheckInEnd = null;
         }
 
-        setSprintPhase(restoredPhase);
-        setIsFocusRunning(restoredRunning);
-        setPhaseRemainingSeconds(restoredRem);
-        phaseEndAtRef.current = restoredPhaseEndAt;
-        const addedWhileRunning =
-          restoredRunning && snap.updatedAt
-            ? Math.max(0, Math.floor((now - snap.updatedAt) / 1000))
-            : 0;
-        const nextElapsed = snap.elapsedSessionSeconds + addedWhileRunning;
-        setElapsedSessionSeconds(nextElapsed);
-        elapsedBaseRef.current = nextElapsed;
-        runningSinceRef.current = restoredRunning ? now : null;
-        reminderFiredRef.current = false;
+        setIsFocusRunning(restFocusRun);
+        setFocusRemainingSeconds(restFocusRem);
+        focusEndAtRef.current = restFocusEnd;
 
-        setAlertEnabled(restoredAlertEnabled);
-        nextAlertAtRef.current = restoredNextAlert;
+        setIsBreakRunning(restBreakRun);
+        setBreakRemainingSeconds(restBreakRem);
+        breakEndAtRef.current = restBreakEnd;
+
+        setIsCheckInRunning(restCheckInRun);
+        nextAlertAtRef.current = restCheckInEnd;
         setSecondsUntilAlert(
-          restoredNextAlert
-            ? Math.max(1, Math.ceil((restoredNextAlert - now) / 1000))
+          restCheckInEnd
+            ? Math.max(1, Math.ceil((restCheckInEnd - now) / 1000))
             : card.timerSettings.checkInMinutes * 60
         );
-        setPose(restoredRunning ? (restoredPhase === 'break' ? 'coffee' : 'typing') : 'coffee');
+
+        const added =
+          restFocusRun && snap.updatedAt
+            ? Math.max(0, Math.floor((now - snap.updatedAt) / 1000))
+            : 0;
+        const nextElapsed = snap.elapsedSessionSeconds + added;
+        setElapsedSessionSeconds(nextElapsed);
+        elapsedBaseRef.current = nextElapsed;
+        runningSinceRef.current = restFocusRun ? now : null;
+        focusReminderFiredRef.current = false;
+        breakReminderFiredRef.current = false;
+
+        setPose(restFocusRun ? 'typing' : 'coffee');
         setCompanionCaption(
-          restoredRunning
+          restFocusRun || restBreakRun
             ? `Welcome back to ${card.title} — your timer kept running.`
             : buildSessionOpeningQuestion(profileNameRef.current, card.title, card.tasks.length > 0)
         );
       } else {
-        setSprintPhase('work');
+        // Fresh card open: ALL three timers start OFF (Check-in NEVER auto-starts without permission!)
         setIsFocusRunning(false);
-        phaseEndAtRef.current = null;
+        focusEndAtRef.current = null;
+        setFocusRemainingSeconds(card.timerSettings.workMinutes * 60);
+
+        setIsBreakRunning(false);
+        breakEndAtRef.current = null;
+        setBreakRemainingSeconds(card.timerSettings.breakMinutes * 60);
+
+        setIsCheckInRunning(false);
+        nextAlertAtRef.current = null;
+        setSecondsUntilAlert(card.timerSettings.checkInMinutes * 60);
+
         runningSinceRef.current = null;
         elapsedBaseRef.current = 0;
-        reminderFiredRef.current = false;
-        setPhaseRemainingSeconds(card.timerSettings.workMinutes * 60);
+        focusReminderFiredRef.current = false;
+        breakReminderFiredRef.current = false;
         setElapsedSessionSeconds(0);
         setPose('speaking');
         sessionStartTimeRef.current = Date.now();
-
-        const nextAlert = alertEnabledRef.current
-          ? Date.now() + card.timerSettings.checkInMinutes * 60_000
-          : null;
-        nextAlertAtRef.current = nextAlert;
-        setSecondsUntilAlert(card.timerSettings.checkInMinutes * 60);
 
         const opening = buildSessionOpeningQuestion(
           profileNameRef.current,
@@ -533,13 +842,16 @@ export default function App() {
         triggerSimulatedSpeech(2400);
         persistActiveTimerSnapshot({
           cardId: card.id,
-          sprintPhase: 'work',
           isFocusRunning: false,
-          phaseEndAt: null,
-          pausedRemainingSeconds: card.timerSettings.workMinutes * 60,
+          focusEndAt: null,
+          focusRemainingSeconds: card.timerSettings.workMinutes * 60,
+          isBreakRunning: false,
+          breakEndAt: null,
+          breakRemainingSeconds: card.timerSettings.breakMinutes * 60,
+          isCheckInRunning: false,
+          checkInEndAt: null,
+          checkInRemainingSeconds: card.timerSettings.checkInMinutes * 60,
           elapsedSessionSeconds: 0,
-          alertEnabled: alertEnabledRef.current,
-          nextAlertAt: nextAlert,
           checkInMinutes: card.timerSettings.checkInMinutes,
         });
       }
@@ -579,21 +891,22 @@ export default function App() {
     setActiveCardId(newCard.id);
     setActiveView('workspace');
     setPanelMode('focus');
-    setSprintPhase('work');
     setIsFocusRunning(false);
-    phaseEndAtRef.current = null;
+    setIsBreakRunning(false);
+    setIsCheckInRunning(false);
+    focusEndAtRef.current = null;
+    breakEndAtRef.current = null;
+    nextAlertAtRef.current = null;
     runningSinceRef.current = null;
     elapsedBaseRef.current = 0;
-    setPhaseRemainingSeconds(newCard.timerSettings.workMinutes * 60);
-    const nextAlert = Date.now() + newCard.timerSettings.checkInMinutes * 60_000;
-    nextAlertAtRef.current = nextAlert;
+    setFocusRemainingSeconds(newCard.timerSettings.workMinutes * 60);
+    setBreakRemainingSeconds(newCard.timerSettings.breakMinutes * 60);
     setSecondsUntilAlert(newCard.timerSettings.checkInMinutes * 60);
     const msg = buildSessionOpeningQuestion(activeProfile.name, newCard.title, false);
     setCompanionCaption(msg);
     triggerSimulatedSpeech(2400);
   }, [activeProfile, openStudyCard, triggerSimulatedSpeech]);
 
-  // Shared Study Room WebSocket & WebRTC
   const studyRoom = useStudyRoom({
     roomId,
     clientId,
@@ -634,11 +947,14 @@ export default function App() {
     ]);
     setActiveProfileId(account.id);
     setActiveCardId(null);
-    phaseEndAtRef.current = null;
+    focusEndAtRef.current = null;
+    breakEndAtRef.current = null;
     nextAlertAtRef.current = null;
     saveTimerSnapshot(null);
     setActiveView(initialInviteRef.current ? 'workspace' : 'hub');
     setIsFocusRunning(false);
+    setIsBreakRunning(false);
+    setIsCheckInRunning(false);
     setElapsedSessionSeconds(0);
     setActiveAlertBanner(null);
     setCompanionCaption(`Hey ${account.username} — your account is ready and synced.`);
@@ -663,11 +979,14 @@ export default function App() {
     ]);
     setActiveProfileId(account.id);
     setActiveCardId(null);
-    phaseEndAtRef.current = null;
+    focusEndAtRef.current = null;
+    breakEndAtRef.current = null;
     nextAlertAtRef.current = null;
     saveTimerSnapshot(null);
     setActiveView(initialInviteRef.current ? 'workspace' : 'hub');
     setIsFocusRunning(false);
+    setIsBreakRunning(false);
+    setIsCheckInRunning(false);
     setElapsedSessionSeconds(0);
     setActiveAlertBanner(null);
     setCompanionCaption(`Welcome back, ${account.username} — loaded ${account.studyCards.length} cards.`);
@@ -679,7 +998,8 @@ export default function App() {
     }
     setAuthToken(null);
     hasUnsyncedCloudRef.current = false;
-    phaseEndAtRef.current = null;
+    focusEndAtRef.current = null;
+    breakEndAtRef.current = null;
     nextAlertAtRef.current = null;
     saveTimerSnapshot(null);
 
@@ -691,6 +1011,8 @@ export default function App() {
     setActiveCardId(null);
     setActiveView('hub');
     setIsFocusRunning(false);
+    setIsBreakRunning(false);
+    setIsCheckInRunning(false);
     setElapsedSessionSeconds(0);
     setActiveAlertBanner(null);
   };
@@ -700,10 +1022,13 @@ export default function App() {
     if (!target) return;
     setActiveProfileId(id);
     setActiveCardId(null);
-    phaseEndAtRef.current = null;
+    focusEndAtRef.current = null;
+    breakEndAtRef.current = null;
     nextAlertAtRef.current = null;
     setActiveView('hub');
     setIsFocusRunning(false);
+    setIsBreakRunning(false);
+    setIsCheckInRunning(false);
     setElapsedSessionSeconds(0);
     setActiveAlertBanner(null);
     setCompanionCaption(`Hey ${target.name} — ready whenever you open a study card.`);
@@ -752,37 +1077,46 @@ export default function App() {
     setActiveCardId(card.id);
     setActiveView('workspace');
     setPanelMode('focus');
-    setSprintPhase('work');
+
+    // All three timers start OFF cleanly until user starts or grants permission
     setIsFocusRunning(false);
-    phaseEndAtRef.current = null;
+    focusEndAtRef.current = null;
+    setFocusRemainingSeconds(card.timerSettings.workMinutes * 60);
+
+    setIsBreakRunning(false);
+    breakEndAtRef.current = null;
+    setBreakRemainingSeconds(card.timerSettings.breakMinutes * 60);
+
+    setIsCheckInRunning(false);
+    setIsCheckInStaged(false);
+    nextAlertAtRef.current = null;
+    setSecondsUntilAlert(card.timerSettings.checkInMinutes * 60);
+
     runningSinceRef.current = null;
     elapsedBaseRef.current = 0;
-    reminderFiredRef.current = false;
-    setPhaseRemainingSeconds(card.timerSettings.workMinutes * 60);
+    focusReminderFiredRef.current = false;
+    breakReminderFiredRef.current = false;
     setElapsedSessionSeconds(0);
     setActiveTaskId(null);
     setActiveAlertBanner(null);
     setPose('speaking');
     sessionStartTimeRef.current = Date.now();
 
-    const nextAlert = alertEnabled
-      ? Date.now() + card.timerSettings.checkInMinutes * 60_000
-      : null;
-    nextAlertAtRef.current = nextAlert;
-    setSecondsUntilAlert(card.timerSettings.checkInMinutes * 60);
-
     const opening = buildSessionOpeningQuestion(profileName, card.title, false);
     setCompanionCaption(opening);
     triggerSimulatedSpeech(2400);
     persistActiveTimerSnapshot({
       cardId: card.id,
-      sprintPhase: 'work',
       isFocusRunning: false,
-      phaseEndAt: null,
-      pausedRemainingSeconds: card.timerSettings.workMinutes * 60,
+      focusEndAt: null,
+      focusRemainingSeconds: card.timerSettings.workMinutes * 60,
+      isBreakRunning: false,
+      breakEndAt: null,
+      breakRemainingSeconds: card.timerSettings.breakMinutes * 60,
+      isCheckInRunning: false,
+      checkInEndAt: null,
+      checkInRemainingSeconds: card.timerSettings.checkInMinutes * 60,
       elapsedSessionSeconds: 0,
-      alertEnabled,
-      nextAlertAt: nextAlert,
       checkInMinutes: card.timerSettings.checkInMinutes,
     });
   };
@@ -805,6 +1139,8 @@ export default function App() {
       setActiveCardId(null);
       setActiveView('hub');
       setIsFocusRunning(false);
+      setIsBreakRunning(false);
+      setIsCheckInRunning(false);
     }
   };
 
@@ -832,6 +1168,36 @@ export default function App() {
             };
             next = [...next, newTask];
             setActiveTaskId((cur) => cur ?? newTask.id);
+          } else if (act.action === 'edit_task') {
+            const targetIdx = next.findIndex(
+              (t) =>
+                (act.taskId && t.id === act.taskId) ||
+                (act.title && t.title.toLowerCase().includes(act.title.toLowerCase()))
+            );
+            if (targetIdx !== -1) {
+              const target = next[targetIdx];
+              next[targetIdx] = {
+                ...target,
+                title: act.newTitle?.trim() ? act.newTitle.trim() : target.title,
+                estimatedMinutes:
+                  typeof act.estimatedMinutes === 'number'
+                    ? act.estimatedMinutes
+                    : target.estimatedMinutes,
+              };
+            }
+          } else if (act.action === 'delete_task') {
+            const targetIdx = next.findIndex(
+              (t) =>
+                (act.taskId && t.id === act.taskId) ||
+                (act.title && t.title.toLowerCase().includes(act.title.toLowerCase()))
+            );
+            if (targetIdx !== -1) {
+              const removedId = next[targetIdx].id;
+              next = next.filter((_, i) => i !== targetIdx);
+              if (activeTaskIdRef.current === removedId) {
+                setActiveTaskId(next.find((t) => !t.completed)?.id ?? null);
+              }
+            }
           } else if (act.action === 'add_subtasks' && act.subtasks?.length) {
             const targetIdx = next.findIndex(
               (t) =>
@@ -897,6 +1263,25 @@ export default function App() {
         if (title) {
           applyTaskActions([{ action: 'add_task', title, estimatedMinutes, subtasks }]);
         }
+      } else if (tool.name === 'editTask') {
+        const match =
+          typeof tool.args.taskTitleMatch === 'string' ? tool.args.taskTitleMatch : '';
+        const newTitle = typeof tool.args.newTitle === 'string' ? tool.args.newTitle : undefined;
+        const estimatedMinutes =
+          typeof tool.args.estimatedMinutes === 'number'
+            ? tool.args.estimatedMinutes
+            : undefined;
+        if (match && (newTitle || estimatedMinutes !== undefined)) {
+          applyTaskActions([
+            { action: 'edit_task', title: match, newTitle, estimatedMinutes },
+          ]);
+        }
+      } else if (tool.name === 'deleteTask') {
+        const match =
+          typeof tool.args.taskTitleMatch === 'string' ? tool.args.taskTitleMatch : '';
+        if (match) {
+          applyTaskActions([{ action: 'delete_task', title: match }]);
+        }
       } else if (tool.name === 'completeTask') {
         const match = typeof tool.args.titleMatch === 'string' ? tool.args.titleMatch : '';
         if (match) {
@@ -918,10 +1303,42 @@ export default function App() {
           typeof tool.args.intervalMinutes === 'number'
             ? tool.args.intervalMinutes
             : undefined;
-        applyCheckInPreference(enabled, mins);
+        if (enabled) {
+          // Speak confirmation BEFORE starting the check-in countdown
+          stageVoiceTimerStart('checkin', mins);
+        } else {
+          executeTimerAction({ timer: 'checkin', action: 'stop', minutes: mins });
+        }
+      } else if (tool.name === 'controlTimer') {
+        const rawTimer = typeof tool.args.timer === 'string' ? tool.args.timer.toLowerCase() : '';
+        const rawAction =
+          typeof tool.args.action === 'string' ? tool.args.action.toLowerCase() : '';
+        const mins =
+          typeof tool.args.minutes === 'number' ? tool.args.minutes : undefined;
+
+        const timer =
+          rawTimer === 'break' || rawTimer === 'checkin' || rawTimer === 'focus'
+            ? rawTimer
+            : null;
+        const action =
+          rawAction === 'start' ||
+          rawAction === 'pause' ||
+          rawAction === 'stop' ||
+          rawAction === 'reset'
+            ? rawAction
+            : null;
+
+        if (timer && action) {
+          if (action === 'start') {
+            // Speak confirmation BEFORE starting timer so user gets 100% of their minutes
+            stageVoiceTimerStart(timer, mins);
+          } else {
+            executeTimerAction({ timer, action, minutes: mins });
+          }
+        }
       }
     },
-    [applyCheckInPreference, applyTaskActions]
+    [applyTaskActions, executeTimerAction, stageVoiceTimerStart]
   );
 
   const commitLiveTranscripts = useCallback(() => {
@@ -933,47 +1350,62 @@ export default function App() {
     if (assistantTxt) {
       setCompanionCaption(assistantTxt);
     }
-  }, []);
+
+    if (stagedVoiceStartsRef.current.length > 0) {
+      if (liveVoiceRef.current?.isAssistantSpeaking) {
+        turnCompleteAwaitingAudioRef.current = true;
+      } else {
+        turnCompleteAwaitingAudioRef.current = false;
+        flushStagedVoiceStarts();
+      }
+    }
+  }, [flushStagedVoiceStarts]);
 
   const liveVoiceRef = useRef<ReturnType<typeof useLiveVoice> | null>(null);
 
-  const handleLiveReady = useCallback(
-    (isReconnect: boolean) => {
-      const card = activeCardRef.current;
-      const currentTasks = tasksRef.current;
-      const settings = timerSettingsRef.current;
-      if (!card || !liveVoiceRef.current) return;
+  const handleLiveReady = useCallback((isReconnect: boolean) => {
+    const card = activeCardRef.current;
+    const currentTasks = tasksRef.current;
+    const settings = timerSettingsRef.current;
+    if (!card || !liveVoiceRef.current) return;
 
-      // On seamless mid-session reconnect, don't interrupt or repeat the greeting
-      if (isReconnect) return;
+    const taskSummary =
+      currentTasks.length > 0
+        ? currentTasks
+            .map((t) => `${t.completed ? '[done] ' : ''}${t.title}`)
+            .join(', ')
+        : 'no tasks added yet';
 
-      const taskSummary =
-        currentTasks.length > 0
-          ? currentTasks
-              .map((t) => `${t.completed ? '[done] ' : ''}${t.title}`)
-              .join(', ')
-          : 'no tasks added yet';
+    const timersSummary = `Focus: ${
+      isFocusRunningRef.current ? 'running' : 'off'
+    } (${settings.workMinutes}m), Break: ${
+      isBreakRunningRef.current ? 'running' : 'off'
+    } (${settings.breakMinutes}m), Check-in: ${
+      isCheckInRunningRef.current ? `running every ${settings.checkInMinutes}m` : 'OFF'
+    }`;
 
-      if (isFocusRunningRef.current) {
-        liveVoiceRef.current.sendTextPrompt(
-          `[Live voice connected for ${profileNameRef.current} on "${card.title}". IMPORTANT: The focus timer is ALREADY running. Do NOT ask what they are planning to do or interrupt their focus. Just quietly say one brief warm sentence that you're studying beside them.]`
-        );
-      } else if (currentTasks.length > 0) {
-        liveVoiceRef.current.sendTextPrompt(
-          `[Live voice connected for ${profileNameRef.current} on "${card.title}". Existing tasks: ${taskSummary}. Check-ins: ${
-            alertEnabled ? `every ${settings.checkInMinutes} minutes` : 'off'
-          }.] Say one brief warm sentence confirming you're live and ready to study together.`
-        );
-      } else {
-        liveVoiceRef.current.sendTextPrompt(
-          `[Live voice connected for ${profileNameRef.current} on "${card.title}". Focus timer has NOT started yet. Check-ins are currently ${
-            alertEnabled ? `every ${settings.checkInMinutes} minutes` : 'off'
-          }.] Ask ${profileNameRef.current} in 1-2 short natural sentences what they want to tackle before starting the timer, and whether they want periodic check-ins (and after how many minutes). Call addTask or setCheckInPreference as soon as they answer.`
-        );
-      }
-    },
-    [alertEnabled]
-  );
+    if (isReconnect) {
+      // Silently restore conversation & timer context after seamless session rotation
+      liveVoiceRef.current.sendContextUpdate(
+        `[Context sync for ${profileNameRef.current} on "${card.title}". Tasks: ${taskSummary}. Timers: ${timersSummary}. Continue naturally without repeating greetings.]`
+      );
+      return;
+    }
+
+    if (isFocusRunningRef.current) {
+      liveVoiceRef.current.sendTextPrompt(
+        `[Live voice connected for ${profileNameRef.current} on "${card.title}". IMPORTANT: Focus timer is ALREADY running. Do NOT ask what they are planning to do or start check-in without permission. Just say one brief warm sentence that you're studying beside them.]`
+      );
+    } else if (currentTasks.length > 0) {
+      liveVoiceRef.current.sendTextPrompt(
+        `[Live voice connected for ${profileNameRef.current} on "${card.title}". Existing tasks: ${taskSummary}. Timers: ${timersSummary}. Do NOT start check-ins without asking permission.] Say one brief warm sentence confirming you're live and ready.`
+      );
+    } else {
+      liveVoiceRef.current.sendTextPrompt(
+        `[Live voice connected for ${profileNameRef.current} on "${card.title}". Timers: ${timersSummary}. Check-ins are OFF until the user explicitly asks or agrees.] Ask ${profileNameRef.current} in 1-2 short natural sentences what they want to work on before starting, and whether they'd like periodic check-ins (and after how many minutes). Wait for their permission before starting check-in.`
+      );
+    }
+  }, []);
 
   const liveVoice = useLiveVoice({
     userName: profileName,
@@ -992,8 +1424,20 @@ export default function App() {
   });
   liveVoiceRef.current = liveVoice;
 
+  // Flush staged voice timer starts the exact moment Sora's spoken confirmation audio finishes playing
   useEffect(() => {
-    if (!isFocusRunning || sprintPhase === 'break') return;
+    if (
+      !liveVoice.isAssistantSpeaking &&
+      turnCompleteAwaitingAudioRef.current &&
+      stagedVoiceStartsRef.current.length > 0
+    ) {
+      turnCompleteAwaitingAudioRef.current = false;
+      flushStagedVoiceStarts();
+    }
+  }, [flushStagedVoiceStarts, liveVoice.isAssistantSpeaking]);
+
+  useEffect(() => {
+    if (!isFocusRunning || isBreakRunning) return;
     setPose('typing');
     const id = window.setInterval(() => {
       setPose((current) => {
@@ -1002,7 +1446,7 @@ export default function App() {
       });
     }, 24000);
     return () => window.clearInterval(id);
-  }, [isFocusRunning, sprintPhase]);
+  }, [isBreakRunning, isFocusRunning]);
 
   const saveLogEntry = useCallback(
     (
@@ -1032,8 +1476,8 @@ export default function App() {
             ? `Accountability clip · ${active.title}`
             : `Self-view accountability clip · ${card.title}`
           : active
-            ? `${phaseLogged === 'work' ? 'Work Sprint' : 'Break'} · ${active.title}`
-            : `${phaseLogged === 'work' ? 'Work Sprint' : 'Break'} · ${card.title}`,
+            ? `${phaseLogged === 'work' ? 'Focus Sprint' : 'Break'} · ${active.title}`
+            : `${phaseLogged === 'work' ? 'Focus Sprint' : 'Break'} · ${card.title}`,
         hasVideo: Boolean(clip),
         videoUrl: clip?.blobUrl,
       };
@@ -1064,7 +1508,7 @@ export default function App() {
             userName: profileNameRef.current,
             cardTitle: activeCardRef.current?.title ?? 'Study Session',
             checkInMinutes: timerSettingsRef.current.checkInMinutes,
-            alertEnabled,
+            alertEnabled: isCheckInRunningRef.current,
           }),
         });
 
@@ -1072,6 +1516,7 @@ export default function App() {
           reply?: string;
           pose?: CompanionPose;
           taskActions?: TaskAction[];
+          timerActions?: TimerControlAction[];
           checkInAction?: { enabled: boolean; intervalMinutes?: number } | null;
         };
 
@@ -1079,11 +1524,18 @@ export default function App() {
           applyTaskActions(data.taskActions);
         }
 
+        if (data.timerActions && data.timerActions.length > 0) {
+          for (const tAct of data.timerActions) {
+            executeTimerAction(tAct);
+          }
+        }
+
         if (data.checkInAction && typeof data.checkInAction.enabled === 'boolean') {
-          applyCheckInPreference(
-            data.checkInAction.enabled,
-            data.checkInAction.intervalMinutes
-          );
+          executeTimerAction({
+            timer: 'checkin',
+            action: data.checkInAction.enabled ? 'start' : 'stop',
+            minutes: data.checkInAction.intervalMinutes,
+          });
         }
 
         const reply = data.reply ?? "Updated your plan—I'm right here with you.";
@@ -1092,19 +1544,19 @@ export default function App() {
 
         const isLive = liveVoiceRef.current?.status === 'live';
         if (isLive) {
-          liveVoiceRef.current?.sendTextPrompt(
-            `[User answered: "${trimmed}". You already responded & updated their list: "${reply}". Keep this context in mind.]`
+          liveVoiceRef.current?.sendContextUpdate(
+            `[User answered: "${trimmed}". Replied & updated list: "${reply}".]`
           );
         } else {
           triggerSimulatedSpeech(2200);
         }
 
-        setPose(data.pose ?? (isFocusRunning ? 'typing' : 'coffee'));
+        setPose(data.pose ?? (isFocusRunningRef.current ? 'typing' : 'coffee'));
       } catch {
         setPose('coffee');
       }
     },
-    [alertEnabled, applyCheckInPreference, applyTaskActions, isFocusRunning, triggerSimulatedSpeech]
+    [applyTaskActions, executeTimerAction, triggerSimulatedSpeech]
   );
 
   const triggerAutomaticAlert = useCallback(async () => {
@@ -1116,13 +1568,16 @@ export default function App() {
     const user = profileNameRef.current;
     const timerRunning = isFocusRunningRef.current;
 
-    // Reset next wall-clock alert deadline immediately so it never stalls
-    const nextTarget = Date.now() + settings.checkInMinutes * 60_000;
-    nextAlertAtRef.current = nextTarget;
-    setSecondsUntilAlert(settings.checkInMinutes * 60);
-    persistActiveTimerSnapshot({ nextAlertAt: nextTarget });
+    if (isCheckInRunningRef.current) {
+      const nextTarget = Date.now() + settings.checkInMinutes * 60_000;
+      nextAlertAtRef.current = nextTarget;
+      setSecondsUntilAlert(settings.checkInMinutes * 60);
+      persistActiveTimerSnapshot({
+        checkInEndAt: nextTarget,
+        checkInRemainingSeconds: settings.checkInMinutes * 60,
+      });
+    }
 
-    // Once the focus timer is running and no tasks were planned beforehand, do NOT disturb by asking what they plan to do
     if (timerRunning && currentTasks.length === 0) {
       return;
     }
@@ -1139,7 +1594,6 @@ export default function App() {
       currentTasks.find((t) => !t.completed);
     const completedCount = currentTasks.filter((t) => t.completed).length;
 
-    // If Live Voice WebSocket is genuinely OPEN, let Sora speak her check-in natively in Kore's voice
     const liveSent =
       liveVoiceRef.current?.status === 'live' &&
       liveVoiceRef.current.sendTextPrompt(
@@ -1152,14 +1606,14 @@ export default function App() {
         }.] Speak aloud directly to ${user}: ${
           activeTask
             ? `warmly ask how progress is going on "${activeTask.title}" and whether you should check it off or split it.`
-            : 'ask what they want to add to their To-Do list before starting the timer.'
+            : 'ask gently how their session is going.'
         }`
       );
 
     if (liveSent) {
       const liveBannerMsg = activeTask
         ? `Checking in on "${activeTask.title}" — tell Sora how it's going!`
-        : `${settings.checkInMinutes}m check-in — tell Sora what you want to add before starting!`;
+        : `${settings.checkInMinutes}m check-in — tell Sora how your study is going!`;
       setActiveAlertBanner({
         kind: 'checkin',
         title: `${settings.checkInMinutes}m Check-In`,
@@ -1188,9 +1642,7 @@ export default function App() {
         data.message ??
         (activeTask
           ? `Hey ${user}, ${settings.checkInMinutes} minutes are up—how is "${activeTask.title}" going? Did you finish it or want to adjust your list?`
-          : timerRunning
-            ? `Checking in quietly, ${user}—steady focus, keep going at your own pace.`
-            : `Hey ${user}, want to pick a task for ${card.title} before starting the timer?`);
+          : `Checking in quietly, ${user}—steady focus, keep going at your own pace.`);
 
       setActiveAlertBanner({
         kind: 'checkin',
@@ -1203,9 +1655,7 @@ export default function App() {
     } catch {
       const fallback = activeTask
         ? `Hey ${user}, ${settings.checkInMinutes}-minute check-in—how did "${activeTask.title}" go? Should I mark it done?`
-        : timerRunning
-          ? `Checking in quietly, ${user}—steady focus, keep going at your own pace.`
-          : `Hey ${user}, what task would you like to add before starting your timer?`;
+        : `Checking in quietly, ${user}—steady focus, keep going at your own pace.`;
       setActiveAlertBanner({
         kind: 'checkin',
         title: `${settings.checkInMinutes}m Check-In`,
@@ -1218,69 +1668,70 @@ export default function App() {
     }
   }, [isLoadingCheckIn, persistActiveTimerSnapshot, triggerSimulatedSpeech]);
 
-  const sprintCompleteHandlerRef = useRef<() => void>(() => {});
-  const reminderHandlerRef = useRef<() => void>(() => {});
+  const focusCompleteHandlerRef = useRef<() => void>(() => {});
+  const breakCompleteHandlerRef = useRef<() => void>(() => {});
+  const reminderHandlerRef = useRef<(phase: SprintPhase) => void>(() => {});
   const alertTriggerRef = useRef(triggerAutomaticAlert);
   alertTriggerRef.current = triggerAutomaticAlert;
 
-  sprintCompleteHandlerRef.current = () => {
-    if (sprintPhaseRef.current === 'work') {
-      const completedDuration = timerSettingsRef.current.workMinutes * 60;
-      saveLogEntry('work', completedDuration);
-      if (timerSettingsRef.current.chimeEnabled) playCueSound('sprint_end');
-      const nextBreakSec = timerSettingsRef.current.breakMinutes * 60;
-      setSprintPhase('break');
-      setPhaseRemainingSeconds(nextBreakSec);
-      phaseEndAtRef.current = Date.now() + nextBreakSec * 1000;
-      reminderFiredRef.current = false;
-      setPose('coffee');
-      const msg = `Nice steady work, ${profileNameRef.current}. Enjoy a ${timerSettingsRef.current.breakMinutes}-minute break.`;
-      setActiveAlertBanner({
-        kind: 'sprint_end',
-        title: 'Work Sprint Complete',
-        message: msg,
-      });
-      setCompanionCaption(msg);
-      triggerSimulatedSpeech(2400);
-    } else {
-      if (timerSettingsRef.current.chimeEnabled) playCueSound('break_end');
-      const nextWorkSec = timerSettingsRef.current.workMinutes * 60;
-      setSprintPhase('work');
-      setPhaseRemainingSeconds(nextWorkSec);
-      phaseEndAtRef.current = Date.now() + nextWorkSec * 1000;
-      reminderFiredRef.current = false;
-      setPose('typing');
-      const msg = `Break complete — ready to ease back in, ${profileNameRef.current}?`;
-      setActiveAlertBanner({
-        kind: 'break_end',
-        title: 'Break Complete',
-        message: msg,
-      });
-      setCompanionCaption(msg);
-      triggerSimulatedSpeech(2200);
-    }
+  focusCompleteHandlerRef.current = () => {
+    const completedDuration = timerSettingsRef.current.workMinutes * 60;
+    saveLogEntry('work', completedDuration);
+    if (timerSettingsRef.current.chimeEnabled) playCueSound('sprint_end');
+
+    // Automatically transition to Break and stop Focus + Check-in per rule
+    executeTimerAction({ timer: 'break', action: 'start' });
+    const msg = `Nice steady work, ${profileNameRef.current}. Enjoy a ${timerSettingsRef.current.breakMinutes}-minute break (check-in paused).`;
+    setActiveAlertBanner({
+      kind: 'sprint_end',
+      title: 'Focus Sprint Complete',
+      message: msg,
+    });
+    setCompanionCaption(msg);
+    triggerSimulatedSpeech(2400);
   };
 
-  reminderHandlerRef.current = () => {
+  breakCompleteHandlerRef.current = () => {
+    if (timerSettingsRef.current.chimeEnabled) playCueSound('break_end');
+    breakEndAtRef.current = null;
+    setIsBreakRunning(false);
+    setBreakRemainingSeconds(timerSettingsRef.current.breakMinutes * 60);
+    persistActiveTimerSnapshot({
+      isBreakRunning: false,
+      breakEndAt: null,
+      breakRemainingSeconds: timerSettingsRef.current.breakMinutes * 60,
+    });
+
+    const msg = `Break complete — ready to start Focus again, ${profileNameRef.current}?`;
+    setActiveAlertBanner({
+      kind: 'break_end',
+      title: 'Break Complete',
+      message: msg,
+    });
+    setCompanionCaption(msg);
+    triggerSimulatedSpeech(2200);
+  };
+
+  reminderHandlerRef.current = (phase: SprintPhase) => {
     if (timerSettingsRef.current.chimeEnabled) playCueSound('reminder');
     const mins = timerSettingsRef.current.reminderMinutesBeforeEnd;
     setActiveAlertBanner({
       kind: 'reminder',
       title: `${mins}m Reminder`,
       message:
-        sprintPhaseRef.current === 'work'
-          ? `${mins} minute${mins === 1 ? '' : 's'} left in your work sprint.`
+        phase === 'work'
+          ? `${mins} minute${mins === 1 ? '' : 's'} left in your focus sprint.`
           : `${mins} minute${mins === 1 ? '' : 's'} left in your break.`,
     });
   };
 
-  // Unified Wall-Clock Timer Sync (runs smoothly across app tabs & browser tab switches!)
+  // Unified Wall-Clock Sync for ALL 3 Independent Timers
   const syncTimersFromWallClock = useCallback(() => {
     const now = Date.now();
 
     if (isFocusRunningRef.current && activeCardRef.current) {
-      if (!phaseEndAtRef.current) {
-        phaseEndAtRef.current = now + phaseRemainingRef.current * 1000;
+      if (!focusEndAtRef.current) {
+        focusEndAtRef.current = now + focusRemainingRef.current * 1000;
       }
       if (!runningSinceRef.current) {
         runningSinceRef.current = now;
@@ -1289,32 +1740,55 @@ export default function App() {
         elapsedBaseRef.current + Math.max(0, Math.floor((now - runningSinceRef.current) / 1000));
       setElapsedSessionSeconds(nextElapsed);
 
-      const rem = Math.max(0, Math.ceil((phaseEndAtRef.current - now) / 1000));
+      const rem = Math.max(0, Math.ceil((focusEndAtRef.current - now) / 1000));
       const reminderSec = timerSettingsRef.current.reminderMinutesBeforeEnd * 60;
-      const totalSec =
-        (sprintPhaseRef.current === 'work'
-          ? timerSettingsRef.current.workMinutes
-          : timerSettingsRef.current.breakMinutes) * 60;
+      const totalSec = timerSettingsRef.current.workMinutes * 60;
 
       if (
         reminderSec > 0 &&
         totalSec > reminderSec &&
         rem > 0 &&
         rem <= reminderSec &&
-        !reminderFiredRef.current
+        !focusReminderFiredRef.current
       ) {
-        reminderFiredRef.current = true;
-        reminderHandlerRef.current();
+        focusReminderFiredRef.current = true;
+        reminderHandlerRef.current('work');
       }
 
       if (rem <= 0) {
-        sprintCompleteHandlerRef.current();
+        focusCompleteHandlerRef.current();
       } else {
-        setPhaseRemainingSeconds(rem);
+        setFocusRemainingSeconds(rem);
       }
     }
 
-    if (alertEnabledRef.current && activeCardRef.current) {
+    if (isBreakRunningRef.current && activeCardRef.current) {
+      if (!breakEndAtRef.current) {
+        breakEndAtRef.current = now + breakRemainingRef.current * 1000;
+      }
+      const rem = Math.max(0, Math.ceil((breakEndAtRef.current - now) / 1000));
+      const reminderSec = timerSettingsRef.current.reminderMinutesBeforeEnd * 60;
+      const totalSec = timerSettingsRef.current.breakMinutes * 60;
+
+      if (
+        reminderSec > 0 &&
+        totalSec > reminderSec &&
+        rem > 0 &&
+        rem <= reminderSec &&
+        !breakReminderFiredRef.current
+      ) {
+        breakReminderFiredRef.current = true;
+        reminderHandlerRef.current('break');
+      }
+
+      if (rem <= 0) {
+        breakCompleteHandlerRef.current();
+      } else {
+        setBreakRemainingSeconds(rem);
+      }
+    }
+
+    if (isCheckInRunningRef.current && activeCardRef.current) {
       const intervalMs = Math.max(1, timerSettingsRef.current.checkInMinutes) * 60_000;
       if (!nextAlertAtRef.current) {
         nextAlertAtRef.current = now + intervalMs;
@@ -1330,38 +1804,13 @@ export default function App() {
     }
   }, []);
 
-  // Sprint & Break wall-clock interval (active regardless of activeView tab!)
   useEffect(() => {
-    if (!isFocusRunning || !activeCardId) return;
-    if (!phaseEndAtRef.current) {
-      phaseEndAtRef.current = Date.now() + phaseRemainingRef.current * 1000;
-    }
-    if (!runningSinceRef.current) {
-      runningSinceRef.current = Date.now();
-    }
+    if (!activeCardId || (!isFocusRunning && !isBreakRunning && !isCheckInRunning)) return;
     syncTimersFromWallClock();
     const id = window.setInterval(syncTimersFromWallClock, 1000);
     return () => window.clearInterval(id);
-  }, [activeCardId, isFocusRunning, sprintPhase, syncTimersFromWallClock]);
+  }, [activeCardId, isBreakRunning, isCheckInRunning, isFocusRunning, syncTimersFromWallClock]);
 
-  // Automatic Check-In wall-clock interval (active across ALL tabs & never reset on view switches!)
-  useEffect(() => {
-    if (!alertEnabled || !activeCardId) {
-      nextAlertAtRef.current = null;
-      return;
-    }
-
-    const intervalMs = Math.max(1, timerSettings.checkInMinutes) * 60_000;
-    if (!nextAlertAtRef.current) {
-      nextAlertAtRef.current = Date.now() + intervalMs;
-    }
-
-    syncTimersFromWallClock();
-    const id = window.setInterval(syncTimersFromWallClock, 1000);
-    return () => window.clearInterval(id);
-  }, [activeCardId, alertEnabled, syncTimersFromWallClock, timerSettings.checkInMinutes]);
-
-  // Immediate catch-up whenever returning from another browser tab or minimizing/restoring window
   useEffect(() => {
     const handleVisibilityOrFocus = () => {
       if (!document.hidden) {
@@ -1388,6 +1837,15 @@ export default function App() {
     };
     updateActiveCard((c) => ({ ...c, tasks: [...c.tasks, item] }));
     setActiveTaskId((cur) => cur ?? item.id);
+  };
+
+  const handleEditTask = (taskId: string, newTitle: string) => {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+    updateActiveCard((c) => ({
+      ...c,
+      tasks: c.tasks.map((t) => (t.id === taskId ? { ...t, title: trimmed } : t)),
+    }));
   };
 
   const handleToggleTask = (taskId: string) => {
@@ -1527,7 +1985,7 @@ export default function App() {
     }));
   };
 
-  // Playlist handlers scoped to active Study Card
+  // Playlist & Trim handlers scoped to active Study Card
   const handleAddVideo = (item: Omit<PlaylistItem, 'id' | 'addedAt'>) => {
     const nextItem: PlaylistItem = {
       ...item,
@@ -1538,6 +1996,29 @@ export default function App() {
       ...c,
       playlist: [...c.playlist, nextItem],
       activeVideoId: nextItem.id,
+    }));
+  };
+
+  const handleAddPlaylistBatch = (items: Array<Omit<PlaylistItem, 'id' | 'addedAt'>>) => {
+    if (items.length === 0) return;
+    const baseTime = Date.now();
+    const created: PlaylistItem[] = items.map((item, idx) => ({
+      ...item,
+      id: `${makeId('vid')}-${idx}`,
+      addedAt: baseTime + idx,
+    }));
+    updateActiveCard((c) => ({
+      ...c,
+      playlist: [...c.playlist, ...created],
+      activeVideoId: created[0].id,
+    }));
+  };
+
+  const handleUpdateTrimSettings = (introSec: number, outroSec: number) => {
+    updateActiveCard((c) => ({
+      ...c,
+      videoTrimIntroSeconds: Math.max(0, Math.round(introSec)),
+      videoTrimOutroSeconds: Math.max(0, Math.round(outroSec)),
     }));
   };
 
@@ -1574,91 +2055,6 @@ export default function App() {
     });
   };
 
-  const handleToggleFocus = () => {
-    const next = !isFocusRunning;
-    const now = Date.now();
-
-    if (next) {
-      if (elapsedSessionSeconds === 0) {
-        sessionStartTimeRef.current = now;
-      }
-      const nextPhaseEnd = now + phaseRemainingSeconds * 1000;
-      phaseEndAtRef.current = nextPhaseEnd;
-      elapsedBaseRef.current = elapsedSessionSeconds;
-      runningSinceRef.current = now;
-      reminderFiredRef.current = false;
-
-      setCompanionCaption((caption) =>
-        caption.includes('What are we working on') ||
-        caption.includes('What do you want to work on') ||
-        caption.includes("What's our focus first")
-          ? "Timer started — I'm studying quietly beside you."
-          : caption
-      );
-      persistActiveTimerSnapshot({
-        isFocusRunning: true,
-        phaseEndAt: nextPhaseEnd,
-        pausedRemainingSeconds: phaseRemainingSeconds,
-        elapsedSessionSeconds,
-      });
-    } else {
-      const rem = phaseEndAtRef.current
-        ? Math.max(0, Math.ceil((phaseEndAtRef.current - now) / 1000))
-        : phaseRemainingSeconds;
-      const totalElapsed = runningSinceRef.current
-        ? elapsedBaseRef.current + Math.max(0, Math.floor((now - runningSinceRef.current) / 1000))
-        : elapsedSessionSeconds;
-
-      phaseEndAtRef.current = null;
-      runningSinceRef.current = null;
-      elapsedBaseRef.current = totalElapsed;
-      setPhaseRemainingSeconds(rem);
-      setElapsedSessionSeconds(totalElapsed);
-      persistActiveTimerSnapshot({
-        isFocusRunning: false,
-        phaseEndAt: null,
-        pausedRemainingSeconds: rem,
-        elapsedSessionSeconds: totalElapsed,
-      });
-    }
-
-    setIsFocusRunning(next);
-    setPose(next ? (sprintPhase === 'break' ? 'coffee' : 'typing') : 'coffee');
-  };
-
-  const handleResetTimer = () => {
-    const resetSec =
-      (sprintPhase === 'work' ? timerSettings.workMinutes : timerSettings.breakMinutes) * 60;
-    phaseEndAtRef.current = null;
-    runningSinceRef.current = null;
-    reminderFiredRef.current = false;
-    setIsFocusRunning(false);
-    setPhaseRemainingSeconds(resetSec);
-    setPose('coffee');
-    persistActiveTimerSnapshot({
-      isFocusRunning: false,
-      phaseEndAt: null,
-      pausedRemainingSeconds: resetSec,
-    });
-  };
-
-  const handleSkipPhase = () => {
-    const nextPhase: SprintPhase = sprintPhase === 'work' ? 'break' : 'work';
-    const nextSec =
-      (nextPhase === 'work' ? timerSettings.workMinutes : timerSettings.breakMinutes) * 60;
-    const nextEnd = isFocusRunning ? Date.now() + nextSec * 1000 : null;
-    phaseEndAtRef.current = nextEnd;
-    reminderFiredRef.current = false;
-    setSprintPhase(nextPhase);
-    setPhaseRemainingSeconds(nextSec);
-    setPose(nextPhase === 'break' ? 'coffee' : isFocusRunning ? 'typing' : 'coffee');
-    persistActiveTimerSnapshot({
-      sprintPhase: nextPhase,
-      phaseEndAt: nextEnd,
-      pausedRemainingSeconds: nextSec,
-    });
-  };
-
   const handleUpdateTimerSettings = (next: TimerSettings) => {
     const prevWork = timerSettings.workMinutes;
     const prevBreak = timerSettings.breakMinutes;
@@ -1666,19 +2062,21 @@ export default function App() {
 
     updateActiveCard((c) => ({ ...c, timerSettings: next }));
 
-    if (!isFocusRunning) {
-      if (sprintPhase === 'work' && next.workMinutes !== prevWork) {
-        setPhaseRemainingSeconds(next.workMinutes * 60);
-      } else if (sprintPhase === 'break' && next.breakMinutes !== prevBreak) {
-        setPhaseRemainingSeconds(next.breakMinutes * 60);
-      }
+    if (!isFocusRunning && next.workMinutes !== prevWork) {
+      setFocusRemainingSeconds(next.workMinutes * 60);
+    }
+    if (!isBreakRunning && next.breakMinutes !== prevBreak) {
+      setBreakRemainingSeconds(next.breakMinutes * 60);
     }
     if (next.checkInMinutes !== prevAlert) {
-      const nextTarget = alertEnabled ? Date.now() + next.checkInMinutes * 60_000 : null;
+      const nextTarget = isCheckInRunning
+        ? Date.now() + next.checkInMinutes * 60_000
+        : null;
       nextAlertAtRef.current = nextTarget;
       setSecondsUntilAlert(next.checkInMinutes * 60);
       persistActiveTimerSnapshot({
-        nextAlertAt: nextTarget,
+        checkInEndAt: nextTarget,
+        checkInRemainingSeconds: next.checkInMinutes * 60,
         checkInMinutes: next.checkInMinutes,
       });
     }
@@ -1776,11 +2174,10 @@ export default function App() {
     }));
   };
 
-  const phaseTotalSeconds =
-    (sprintPhase === 'work' ? timerSettings.workMinutes : timerSettings.breakMinutes) * 60;
+  const activeSprintPhase: SprintPhase = isBreakRunning ? 'break' : 'work';
 
   return (
-    <div className="relative flex min-h-screen flex-col bg-[#090B14] text-slate-100 lg:h-screen lg:overflow-hidden">
+    <div className="relative flex min-h-screen flex-col bg-transparent text-slate-100 lg:h-screen lg:overflow-hidden">
       <ParticleBackground />
 
       <TopBar
@@ -1796,8 +2193,13 @@ export default function App() {
         }}
         onOpenProfiles={() => setIsProfileModalOpen(true)}
         isFocusRunning={isFocusRunning}
-        sprintPhase={sprintPhase}
-        onToggleFocus={handleToggleFocus}
+        sprintPhase={activeSprintPhase}
+        onToggleFocus={() =>
+          executeTimerAction({
+            timer: 'focus',
+            action: isFocusRunning ? 'pause' : 'start',
+          })
+        }
         logsCount={totalLogsCount}
       />
 
@@ -1846,37 +2248,56 @@ export default function App() {
               onJoinRoomInput={handleJoinRoomInput}
               onLeaveRoom={handleLeaveRoom}
               onCameraStreamChange={studyRoom.attachLocalCamera}
-              onRecordingSaved={(clip) => saveLogEntry(sprintPhase, clip.durationSeconds, clip)}
+              onRecordingSaved={(clip) =>
+                saveLogEntry(activeSprintPhase, clip.durationSeconds, clip)
+              }
             />
           </div>
 
-          {/* Right Column: Slim Timer + Visible Check-in Countdown + Focus Plan / Video & Playlist */}
+          {/* Right Column: Mode Switch + 3 Separate Timers (Focus | Break | Check-in) + Workspace */}
           <div className="flex min-h-0 flex-col gap-3 md:col-span-7 lg:col-span-8">
             <SessionTimerBar
               panelMode={panelMode}
               onChangePanelMode={setPanelMode}
-              sprintPhase={sprintPhase}
-              phaseRemainingSeconds={phaseRemainingSeconds}
-              phaseTotalSeconds={phaseTotalSeconds}
-              elapsedSessionSeconds={elapsedSessionSeconds}
+              focusRemainingSeconds={focusRemainingSeconds}
+              focusTotalSeconds={timerSettings.workMinutes * 60}
               isFocusRunning={isFocusRunning}
+              breakRemainingSeconds={breakRemainingSeconds}
+              breakTotalSeconds={timerSettings.breakMinutes * 60}
+              isBreakRunning={isBreakRunning}
+              elapsedSessionSeconds={elapsedSessionSeconds}
               timerSettings={timerSettings}
-              alertEnabled={alertEnabled}
+              isCheckInRunning={isCheckInRunning}
+              isCheckInStaged={isCheckInStaged}
               secondsUntilAlert={secondsUntilAlert}
               activeAlertBanner={activeAlertBanner}
               isLoadingCheckIn={isLoadingCheckIn}
-              onToggleFocus={handleToggleFocus}
-              onResetTimer={handleResetTimer}
-              onSkipPhase={handleSkipPhase}
+              onToggleFocus={() =>
+                executeTimerAction({
+                  timer: 'focus',
+                  action: isFocusRunning ? 'pause' : 'start',
+                })
+              }
+              onResetFocus={() => executeTimerAction({ timer: 'focus', action: 'reset' })}
+              onToggleBreak={() =>
+                executeTimerAction({
+                  timer: 'break',
+                  action: isBreakRunning ? 'pause' : 'start',
+                })
+              }
+              onResetBreak={() => executeTimerAction({ timer: 'break', action: 'reset' })}
               onUpdateTimerSettings={handleUpdateTimerSettings}
-              onToggleAlertEnabled={() => {
-                applyCheckInPreference(!alertEnabled);
-              }}
+              onToggleCheckIn={() =>
+                executeTimerAction({
+                  timer: 'checkin',
+                  action: isCheckInRunning || isCheckInStaged ? 'stop' : 'start',
+                })
+              }
               onTriggerAlertNow={triggerAutomaticAlert}
               onAlertReply={handleAlertReply}
               onDismissAlert={() => setActiveAlertBanner(null)}
               onSaveSessionLog={() => {
-                saveLogEntry(sprintPhase, elapsedSessionSeconds);
+                saveLogEntry(activeSprintPhase, elapsedSessionSeconds);
                 setCompanionCaption(`Saved ${activeCard.title} progress to History, ${profileName}.`);
                 triggerSimulatedSpeech(1800);
               }}
@@ -1888,6 +2309,7 @@ export default function App() {
                 activeTaskId={activeTaskId}
                 breakingDownTaskId={breakingDownTaskId}
                 onAddTask={handleAddTask}
+                onEditTask={handleEditTask}
                 onToggleTask={handleToggleTask}
                 onDeleteTask={handleDeleteTask}
                 onToggleCollapse={handleToggleCollapse}
@@ -1905,12 +2327,16 @@ export default function App() {
               <VideoPlaylistPanel
                 playlist={playlist}
                 activeVideoId={activeCard.activeVideoId}
+                trimIntroSeconds={activeCard.videoTrimIntroSeconds ?? 0}
+                trimOutroSeconds={activeCard.videoTrimOutroSeconds ?? 0}
                 inSharedRoom={Boolean(roomId)}
                 watchTogether={watchTogether}
                 remoteVideoState={studyRoom.sharedVideoState}
                 onToggleWatchTogether={() => setWatchTogether((w) => !w)}
                 onSelectVideo={handleSelectVideo}
                 onAddVideo={handleAddVideo}
+                onAddPlaylistBatch={handleAddPlaylistBatch}
+                onUpdateTrimSettings={handleUpdateTrimSettings}
                 onRemoveVideo={handleRemoveVideo}
                 onReorderVideo={handleReorderVideo}
                 onBroadcastVideoSync={studyRoom.sendVideoSync}

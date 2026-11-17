@@ -36,6 +36,8 @@ export function createStudyCard(
     tasks: [],
     playlist: [],
     activeVideoId: null,
+    videoTrimIntroSeconds: 0,
+    videoTrimOutroSeconds: 0,
     timerSettings: { ...timerSettings },
     sessionLogs: [],
   };
@@ -66,6 +68,14 @@ export function normalizeStudyCards(rawCards: unknown[]): StudySessionCard[] {
         ? c.playlist.filter((v) => v.sourceType !== 'local')
         : [],
       activeVideoId: c.activeVideoId ?? null,
+      videoTrimIntroSeconds:
+        typeof c.videoTrimIntroSeconds === 'number' && c.videoTrimIntroSeconds >= 0
+          ? c.videoTrimIntroSeconds
+          : 0,
+      videoTrimOutroSeconds:
+        typeof c.videoTrimOutroSeconds === 'number' && c.videoTrimOutroSeconds >= 0
+          ? c.videoTrimOutroSeconds
+          : 0,
       timerSettings: { ...DEFAULT_TIMER_SETTINGS, ...(c.timerSettings ?? {}) },
       sessionLogs: Array.isArray(c.sessionLogs)
         ? c.sessionLogs.map((l) => ({ ...l, videoUrl: undefined }))
@@ -281,7 +291,15 @@ export function loadTimerSnapshot(): ActiveTimerSnapshot | null {
     const raw = localStorage.getItem(TIMER_SNAPSHOT_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ActiveTimerSnapshot;
-    if (!parsed || typeof parsed.cardId !== 'string') return null;
+    if (
+      !parsed ||
+      typeof parsed.cardId !== 'string' ||
+      typeof parsed.focusRemainingSeconds !== 'number' ||
+      typeof parsed.breakRemainingSeconds !== 'number' ||
+      typeof parsed.checkInRemainingSeconds !== 'number'
+    ) {
+      return null;
+    }
     return parsed;
   } catch {
     return null;

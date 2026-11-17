@@ -21,8 +21,248 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..600;1,9..40,400..500&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
       rel="stylesheet"
     />
+
+    <!-- =========================================================================
+         FOCUSPAIR UI / UX THEME & CUSTOMIZABLE VISUAL TOKENS
+         Edit any CSS variable or surface rule below to customize the entire app.
+         ========================================================================= -->
+    <style id="focuspair-theme">
+      :root {
+        /* Typography */
+        --font-display: 'Plus Jakarta Sans', system-ui, sans-serif;
+        --font-body: 'DM Sans', system-ui, sans-serif;
+        --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+        /* Deep Midnight Ocean Backdrop */
+        --fp-bg-base: #030a11;
+        --fp-bg-deep: #02080f;
+        --fp-bg-mid: #061b26;
+        --fp-text-primary: #f1f7fc;
+        --fp-text-secondary: rgba(214, 232, 242, 0.76);
+
+        /* Particle & Bioluminescent Light Palette (RGB triplets for canvas + gradients) */
+        --fp-cyan-hex: #67e8f9;
+        --fp-cyan-bright: #7ef3ff;
+        --fp-gold-hex: #fbbf24;
+        --fp-gold-soft: #fde68a;
+        --fp-cyan-rgb: 78, 235, 255;
+        --fp-teal-rgb: 56, 217, 198;
+        --fp-gold-rgb: 251, 198, 78;
+
+        /* Translucent Frosted Glass Cards & Cyan-to-Gold Borders */
+        --fp-glass-bg: linear-gradient(
+          135deg,
+          rgba(12, 34, 46, 0.44) 0%,
+          rgba(7, 20, 30, 0.56) 52%,
+          rgba(16, 26, 36, 0.48) 100%
+        );
+        --fp-glass-blur: 18px;
+        --fp-glass-radius: 14px;
+        --fp-border-gradient: linear-gradient(
+          132deg,
+          rgba(94, 242, 255, 0.72) 0%,
+          rgba(120, 224, 224, 0.34) 38%,
+          rgba(253, 224, 136, 0.46) 72%,
+          rgba(251, 191, 36, 0.78) 100%
+        );
+        --fp-glass-shadow:
+          0 18px 48px -18px rgba(1, 7, 14, 0.85),
+          -8px -6px 28px -14px rgba(56, 225, 248, 0.22),
+          10px 10px 30px -14px rgba(251, 191, 36, 0.18);
+
+        /* Interactive Controls & Input Wells */
+        --fp-input-bg: rgba(4, 15, 24, 0.56);
+        --fp-input-border: rgba(132, 225, 244, 0.22);
+        --fp-cta-gradient: linear-gradient(
+          135deg,
+          #6ff0ff 0%,
+          #9beee8 38%,
+          #f5e096 72%,
+          #f2c45a 100%
+        );
+        --fp-cta-text: #06131c;
+        --fp-progress-gradient: linear-gradient(90deg, #38e2f8 0%, #7ef3ff 45%, #fcd34d 100%);
+      }
+
+      html,
+      body {
+        font-family: var(--font-body);
+        background-color: var(--fp-bg-base);
+        color: var(--fp-text-primary);
+        letter-spacing: 0.01em;
+        overflow-x: hidden;
+      }
+
+      h1,
+      h2,
+      h3,
+      h4,
+      .font-display {
+        font-family: var(--font-display);
+        text-wrap: balance;
+      }
+
+      .font-mono-tabular {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Top Navigation Glass Bar */
+      .fp-topbar {
+        background: linear-gradient(
+          180deg,
+          rgba(4, 14, 22, 0.78) 0%,
+          rgba(4, 12, 20, 0.58) 100%
+        );
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-bottom: 1px solid rgba(110, 231, 248, 0.14);
+      }
+
+      /* Translucent Glass Panel with Cyan-to-Gold Luminous Gradient Border */
+      .glass-panel {
+        position: relative;
+        background: var(--fp-glass-bg);
+        backdrop-filter: blur(var(--fp-glass-blur)) saturate(135%);
+        -webkit-backdrop-filter: blur(var(--fp-glass-blur)) saturate(135%);
+        border: 1px solid rgba(125, 225, 242, 0.16);
+        box-shadow: var(--fp-glass-shadow);
+      }
+
+      .glass-panel::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        padding: 1px;
+        background: var(--fp-border-gradient);
+        -webkit-mask:
+          linear-gradient(#fff 0 0) content-box,
+          linear-gradient(#fff 0 0);
+        -webkit-mask-composite: xor;
+        mask:
+          linear-gradient(#fff 0 0) content-box,
+          linear-gradient(#fff 0 0);
+        mask-composite: exclude;
+        pointer-events: none;
+        z-index: 1;
+      }
+
+      /* Luminous Cyan-to-Gold Primary Action Button */
+      .bio-btn-primary {
+        background: var(--fp-cta-gradient);
+        color: var(--fp-cta-text);
+        box-shadow:
+          0 0 22px rgba(78, 235, 255, 0.24),
+          0 0 18px rgba(251, 198, 78, 0.2);
+        transition: filter 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+      }
+
+      .bio-btn-primary:hover:not(:disabled) {
+        filter: brightness(1.07);
+        box-shadow:
+          0 0 28px rgba(111, 240, 255, 0.36),
+          0 0 22px rgba(251, 198, 78, 0.3);
+      }
+
+      /* Soft Bioluminescent Chip / Active Border State */
+      .bio-glow-chip {
+        border-color: rgba(111, 240, 255, 0.34);
+        background: linear-gradient(
+          135deg,
+          rgba(56, 225, 248, 0.14) 0%,
+          rgba(251, 198, 78, 0.12) 100%
+        );
+        color: #e6fbff;
+        box-shadow: 0 0 16px rgba(78, 235, 255, 0.14);
+      }
+
+      /* Quick-Create Translucent Pill Buttons */
+      .fp-quick-chip {
+        background: rgba(8, 23, 35, 0.54);
+        border: 1px solid rgba(125, 225, 242, 0.18);
+        color: #d7eef8;
+        transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+      }
+
+      .fp-quick-chip:hover {
+        border-color: rgba(111, 240, 255, 0.45);
+        background: linear-gradient(
+          135deg,
+          rgba(56, 225, 248, 0.15) 0%,
+          rgba(251, 198, 78, 0.12) 100%
+        );
+        box-shadow: 0 0 14px rgba(78, 235, 255, 0.16);
+      }
+
+      /* Color Swatch Capsule */
+      .fp-dot-picker {
+        background: rgba(10, 27, 40, 0.62);
+        border: 1px solid rgba(140, 230, 248, 0.24);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+
+      /* Progress Bar */
+      .bio-progress {
+        background: var(--fp-progress-gradient);
+      }
+
+      /* Midnight Glass Inputs */
+      .bio-input {
+        background: var(--fp-input-bg);
+        border: 1px solid var(--fp-input-border);
+        color: var(--fp-text-primary);
+        transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+      }
+
+      .bio-input:focus {
+        outline: none;
+        background: rgba(5, 19, 30, 0.78);
+        border-color: rgba(103, 232, 249, 0.62);
+        box-shadow: 0 0 0 3px rgba(56, 225, 248, 0.14);
+      }
+
+      /* Quiet Scrollbar */
+      .quiet-scroll::-webkit-scrollbar {
+        width: 5px;
+        height: 5px;
+      }
+
+      .quiet-scroll::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .quiet-scroll::-webkit-scrollbar-thumb {
+        background: rgba(103, 232, 249, 0.24);
+        border-radius: 9999px;
+      }
+
+      .quiet-scroll::-webkit-scrollbar-thumb:hover {
+        background: rgba(251, 191, 36, 0.42);
+      }
+
+      @keyframes gentle-breathe {
+        0%,
+        100% {
+          transform: scale(1.01);
+        }
+        50% {
+          transform: scale(1.03);
+        }
+      }
+
+      .animate-gentle-breathe {
+        animation: gentle-breathe 12s ease-in-out infinite;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .animate-gentle-breathe {
+          animation: none;
+        }
+      }
+    </style>
   </head>
-  <body class="bg-[#090B14] text-[#F1F3F9] antialiased selection:bg-amber-400/25 selection:text-amber-100">
+  <body class="antialiased selection:bg-cyan-400/25 selection:text-cyan-100">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -126,9 +126,10 @@ export function CoStudyRoomPanel({
   const startCamera = useCallback(async () => {
     setError(null);
     try {
+      const needsAudio = Boolean(roomId) || !micMuted;
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: true,
+        audio: needsAudio,
       });
       streamRef.current = stream;
 
@@ -149,17 +150,31 @@ export function CoStudyRoomPanel({
       setError(message);
       setCameraOn(false);
     }
-  }, [micMuted]);
+  }, [micMuted, roomId]);
 
   const toggleCamera = () => {
     if (cameraOn) stopStream();
     else startCamera();
   };
 
-  const toggleMic = () => {
+  const toggleMic = async () => {
     const nextMuted = !micMuted;
     setMicMuted(nextMuted);
     if (streamRef.current) {
+      const audioTracks = streamRef.current.getAudioTracks();
+      if (!nextMuted && audioTracks.length === 0) {
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const track = audioStream.getAudioTracks()[0];
+          if (track) {
+            streamRef.current.addTrack(track);
+            onCameraChangeRef.current(streamRef.current);
+          }
+        } catch {
+          setMicMuted(true);
+          return;
+        }
+      }
       for (const track of streamRef.current.getAudioTracks()) {
         track.enabled = !nextMuted;
       }
@@ -259,9 +274,9 @@ export function CoStudyRoomPanel({
       className="glass-panel flex min-h-[250px] flex-1 flex-col overflow-hidden rounded-xl"
     >
       {/* Top Bar: Share Friend Link + Join + Camera Controls */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 border-b border-white/[0.07] px-3 py-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 border-b border-cyan-200/[0.08] px-3 py-2">
         <div className="flex items-center gap-1.5 min-w-0">
-          <Users className="h-3.5 w-3.5 text-amber-300 shrink-0" />
+          <Users className="h-3.5 w-3.5 text-cyan-300 shrink-0" />
           <span className="truncate text-xs font-medium text-slate-200">
             {roomId
               ? remoteParticipants.length > 0
@@ -277,12 +292,12 @@ export function CoStudyRoomPanel({
           <button
             type="button"
             onClick={handleShareClick}
-            className="flex h-7 cursor-pointer items-center gap-1 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 text-[11px] font-medium text-amber-200 transition-colors hover:bg-amber-400/20 whitespace-nowrap"
+            className="bio-glow-chip flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-all hover:brightness-115 whitespace-nowrap"
           >
             {copyState === 'copied' ? (
-              <Check className="h-3 w-3" />
+              <Check className="h-3 w-3 text-cyan-200" />
             ) : (
-              <Link2 className="h-3 w-3" />
+              <Link2 className="h-3 w-3 text-amber-200" />
             )}
             {copyState === 'copied' ? 'Copied' : roomId ? 'Invite' : 'Share Link'}
           </button>
@@ -293,8 +308,8 @@ export function CoStudyRoomPanel({
               onClick={() => setShowJoinInput((v) => !v)}
               className={`h-7 cursor-pointer rounded-md border px-2 text-[11px] font-medium transition-colors whitespace-nowrap ${
                 showJoinInput
-                  ? 'border-amber-400/35 bg-amber-400/15 text-amber-200'
-                  : 'border-white/[0.08] bg-white/[0.04] text-slate-300 hover:bg-white/10'
+                  ? 'bio-glow-chip'
+                  : 'border-cyan-200/12 bg-cyan-400/[0.04] text-slate-300 hover:border-cyan-300/35 hover:text-cyan-100'
               }`}
             >
               Join
@@ -307,7 +322,7 @@ export function CoStudyRoomPanel({
               onClick={onLeaveRoom}
               title="Leave shared room"
               aria-label="Leave shared room"
-              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border border-white/[0.08] text-slate-400 hover:bg-rose-500/15 hover:text-rose-200"
+              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border border-cyan-200/12 text-slate-400 hover:bg-rose-500/15 hover:text-rose-200"
             >
               <LogOut className="h-3 w-3" />
             </button>
@@ -320,8 +335,8 @@ export function CoStudyRoomPanel({
             aria-label="Flip camera view"
             className={`flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors ${
               mirrored
-                ? 'border-white/15 bg-white/10 text-slate-100'
-                : 'border-white/[0.08] bg-white/[0.03] text-slate-400'
+                ? 'border-cyan-300/30 bg-cyan-400/10 text-cyan-100'
+                : 'border-cyan-200/12 bg-cyan-400/[0.03] text-slate-400'
             }`}
           >
             <FlipHorizontal2 className="h-3 w-3" />
@@ -334,8 +349,8 @@ export function CoStudyRoomPanel({
             aria-label={fillFrame ? 'Show full camera frame' : 'Zoom to fill frame'}
             className={`flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors ${
               !fillFrame
-                ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-                : 'border-white/[0.08] bg-white/[0.03] text-slate-400'
+                ? 'bio-glow-chip'
+                : 'border-cyan-200/12 bg-cyan-400/[0.03] text-slate-400'
             }`}
           >
             {fillFrame ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
@@ -348,8 +363,8 @@ export function CoStudyRoomPanel({
             aria-label={micMuted ? 'Unmute mic' : 'Mute mic'}
             className={`flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors ${
               !micMuted
-                ? 'border-amber-400/35 bg-amber-400/15 text-amber-200'
-                : 'border-white/[0.08] bg-white/[0.03] text-slate-400'
+                ? 'bio-glow-chip'
+                : 'border-cyan-200/12 bg-cyan-400/[0.03] text-slate-400'
             }`}
           >
             {micMuted ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
@@ -360,8 +375,8 @@ export function CoStudyRoomPanel({
             onClick={toggleCamera}
             className={`flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors whitespace-nowrap ${
               cameraOn
-                ? 'border-white/15 bg-white/10 text-slate-100'
-                : 'border-white/[0.08] bg-white/[0.04] text-slate-300 hover:bg-white/10'
+                ? 'border-cyan-300/35 bg-cyan-400/15 text-cyan-100'
+                : 'border-cyan-200/12 bg-cyan-400/[0.04] text-slate-300 hover:border-cyan-300/35 hover:text-cyan-100'
             }`}
           >
             {cameraOn ? <Video className="h-3 w-3" /> : <VideoOff className="h-3 w-3" />}
@@ -374,7 +389,7 @@ export function CoStudyRoomPanel({
             className={`flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors whitespace-nowrap ${
               isRecording
                 ? 'border-rose-400/40 bg-rose-500/20 text-rose-200'
-                : 'border-white/[0.08] bg-white/[0.04] text-slate-300 hover:bg-white/10'
+                : 'border-cyan-200/12 bg-cyan-400/[0.04] text-slate-300 hover:border-cyan-300/35'
             }`}
           >
             {isRecording ? (
@@ -394,8 +409,8 @@ export function CoStudyRoomPanel({
 
       {/* Visible Shareable Link + Code Bar (or Join Input) */}
       {roomId && shareUrl ? (
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.07] bg-[#0B0F1E]/90 px-3 py-1.5">
-          <span className="font-mono-tabular shrink-0 rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-cyan-200/[0.08] bg-[#050918]/85 px-3 py-1.5">
+          <span className="bio-glow-chip font-mono-tabular shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-semibold">
             {roomId.toUpperCase()}
           </span>
           <input
@@ -404,17 +419,17 @@ export function CoStudyRoomPanel({
             value={shareUrl}
             onFocus={(e) => e.currentTarget.select()}
             aria-label="Shareable friend invite link"
-            className="min-w-0 flex-1 rounded border border-white/[0.08] bg-[#080B16] px-2 py-0.5 text-[11px] text-slate-300 focus:outline-none"
+            className="bio-input min-w-0 flex-1 rounded px-2 py-0.5 text-[11px] text-slate-200"
           />
           <button
             type="button"
             onClick={handleCopyShareField}
             title="Copy invite link"
             aria-label="Copy invite link"
-            className="flex h-6 cursor-pointer items-center gap-1 rounded border border-white/10 bg-white/[0.06] px-2 text-[10px] font-medium text-slate-200 hover:bg-white/10 shrink-0"
+            className="flex h-6 cursor-pointer items-center gap-1 rounded border border-cyan-200/15 bg-cyan-400/[0.07] px-2 text-[10px] font-medium text-cyan-100 hover:bg-cyan-400/15 shrink-0"
           >
             {copyState === 'copied' ? (
-              <Check className="h-3 w-3 text-emerald-300" />
+              <Check className="h-3 w-3 text-cyan-300" />
             ) : (
               <Copy className="h-3 w-3" />
             )}
@@ -425,7 +440,7 @@ export function CoStudyRoomPanel({
         showJoinInput && (
           <form
             onSubmit={handleJoinSubmit}
-            className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.07] bg-[#0B0F1E]/90 px-3 py-1.5"
+            className="flex shrink-0 items-center gap-1.5 border-b border-cyan-200/[0.08] bg-[#050918]/85 px-3 py-1.5"
           >
             <input
               type="text"
@@ -433,12 +448,12 @@ export function CoStudyRoomPanel({
               value={joinDraft}
               onChange={(e) => setJoinDraft(e.target.value)}
               placeholder="Paste friend's room code or invite link..."
-              className="min-w-0 flex-1 rounded border border-white/10 bg-[#080B16] px-2 py-1 text-[11px] text-slate-100 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
+              className="bio-input min-w-0 flex-1 rounded px-2 py-1 text-[11px] placeholder:text-slate-500"
             />
             <button
               type="submit"
               disabled={!joinDraft.trim()}
-              className="h-6 cursor-pointer rounded bg-amber-400 px-2.5 text-[11px] font-semibold text-slate-950 hover:bg-amber-300 disabled:opacity-40"
+              className="bio-btn-primary h-6 cursor-pointer rounded px-2.5 text-[11px] font-semibold disabled:opacity-40"
             >
               Join
             </button>
@@ -447,7 +462,7 @@ export function CoStudyRoomPanel({
       )}
 
       {/* Camera / Friend Co-Study Viewport */}
-      <div className="relative min-h-[200px] flex-1 overflow-hidden bg-[#070A14]">
+      <div className="relative min-h-[200px] flex-1 overflow-hidden bg-[#040711]/70">
         {/* Self-view video (Fit by default so full face & head stay uncropped) */}
         <video
           ref={selfVideoRef}
@@ -461,7 +476,7 @@ export function CoStudyRoomPanel({
 
         {/* Remote friend live camera picture-in-picture if active */}
         {remoteStream && (
-          <div className="absolute bottom-2.5 right-2.5 h-24 w-36 overflow-hidden rounded-lg border border-amber-400/40 bg-black shadow-lg">
+          <div className="absolute bottom-2.5 right-2.5 h-24 w-36 overflow-hidden rounded-lg border border-cyan-300/45 bg-black shadow-[0_0_18px_rgba(56,189,248,0.22)]">
             <video
               ref={peerVideoRef}
               autoPlay
@@ -479,10 +494,10 @@ export function CoStudyRoomPanel({
                 {remoteParticipants.map((friend) => (
                   <div
                     key={friend.clientId}
-                    className="rounded-lg border border-emerald-400/25 bg-emerald-400/10 px-3.5 py-2 text-xs text-emerald-100"
+                    className="bio-glow-chip rounded-lg border px-3.5 py-2 text-xs"
                   >
-                    <span className="font-semibold">{friend.name}</span>
-                    <span className="mx-1.5 text-emerald-300/70">·</span>
+                    <span className="font-semibold text-cyan-100">{friend.name}</span>
+                    <span className="mx-1.5 text-cyan-300/70">·</span>
                     <span>
                       {friend.mode === 'video' ? 'In Video Mode' : 'In Focus Mode'}
                       {friend.isFocusing ? ' · Timer running' : ''}
@@ -495,7 +510,7 @@ export function CoStudyRoomPanel({
               </div>
             ) : (
               <>
-                <VideoOff className="mb-1.5 h-5 w-5 text-slate-500" />
+                <VideoOff className="mb-1.5 h-5 w-5 text-cyan-300/60" />
                 <p className="text-xs font-medium text-slate-300">
                   {roomId
                     ? `Share code ${roomId.toUpperCase()} or the link above with your friend`
@@ -510,7 +525,7 @@ export function CoStudyRoomPanel({
         )}
 
         {isRecording && (
-          <div className="absolute left-3 top-2.5 flex items-center gap-2 rounded-md bg-black/65 px-2 py-1 text-xs font-medium text-rose-200 backdrop-blur-md">
+          <div className="absolute left-3 top-2.5 flex items-center gap-2 rounded-md bg-[#040711]/75 px-2 py-1 text-xs font-medium text-rose-200 backdrop-blur-md">
             <span className="h-2 w-2 rounded-full bg-rose-500" />
             <span>REC</span>
             <span className="font-mono-tabular text-rose-100">

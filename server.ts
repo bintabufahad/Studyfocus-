@@ -7,8 +7,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
+  EndSensitivity,
   GoogleGenAI,
   Modality,
+  StartSensitivity,
   ThinkingLevel,
   Type,
   type FunctionDeclaration,
@@ -39,11 +41,12 @@ function getAiClient() {
 const SORA_SYSTEM_INSTRUCTION = `You are Sora, a warm, calm, attentive ADHD body-doubling accountability partner sitting across the desk.
 Your behavior rules:
 - Grounded, gentle, zero guilt, zero toxic productivity pressure.
-- BEFORE the focus timer starts (when no tasks exist yet and the timer is off), warmly ask two clear things: (1) what they want to work on today, and (2) whether they want periodic check-ins and after how many minutes.
+- BEFORE the focus timer starts (when no tasks exist yet and timers are off), warmly ask two clear things: (1) what they want to work on today, and (2) whether they want periodic check-ins and after how many minutes. NEVER turn on or start check-ins unless the user explicitly agrees or asks for them.
 - ONCE the focus timer is running, NEVER disturb the user by asking what they are planning to do. Stay quietly supportive; during scheduled check-ins on existing tasks, only ask gently how progress is going on their current task.
-- Whenever the user tells you how often to check in (e.g. "every 10 minutes", "check on me in 5 mins", "no check-ins", "stop checking up"), ALWAYS call/emit the check-in preference update immediately so the app timer updates.
-- Whenever the user shares goals, tasks, overwhelm, or progress (e.g. "I finished X", "I'm stuck on Y", "Next I want to do Z"), proactively update their live To-Do list (add tasks, check off completed tasks, or add tiny 5-10 min micro-steps).
-- Keep spoken and text responses natural, warm, and concise (1 to 3 short sentences).`;
+- You have THREE separate timers you can control via controlTimer (and setCheckInPreference): Focus, Break, and Check-in. Starting Break automatically stops Focus and Check-in.
+- Whenever the user asks you to start Check-in, Focus, or Break, call the tool immediately and speak ONLY ONE ultra-short sentence BEFORE the timer begins (for example: "Now your 10-minute check-in starts." or "Starting your 5-minute break now."). Keep it short so zero focus/check-in time is wasted.
+- You can add, edit, complete, break down, or delete tasks anytime the user asks (addTask, editTask, deleteTask, completeTask, addSubtasks).
+- Keep spoken and text responses natural, warm, and concise (1 to 2 short sentences).`;
 
 const addTaskLiveTool: FunctionDeclaration = {
   name: 'addTask',
@@ -67,6 +70,46 @@ const addTaskLiveTool: FunctionDeclaration = {
       },
     },
     required: ['title'],
+  },
+};
+
+const editTaskLiveTool: FunctionDeclaration = {
+  name: 'editTask',
+  description:
+    'Renames an existing task or updates its estimated minutes on the user To-Do list.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      taskTitleMatch: {
+        type: Type.STRING,
+        description: 'Part or full current title of the task to edit.',
+      },
+      newTitle: {
+        type: Type.STRING,
+        description: 'The updated task title.',
+      },
+      estimatedMinutes: {
+        type: Type.NUMBER,
+        description: 'Optional updated duration estimate in minutes.',
+      },
+    },
+    required: ['taskTitleMatch'],
+  },
+};
+
+const deleteTaskLiveTool: FunctionDeclaration = {
+  name: 'deleteTask',
+  description:
+    'Removes/deletes an existing task from the user To-Do list.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      taskTitleMatch: {
+        type: Type.STRING,
+        description: 'Part or full title of the task to delete.',
+      },
+    },
+    required: ['taskTitleMatch'],
   },
 };
 
@@ -110,13 +153,13 @@ const addSubtasksLiveTool: FunctionDeclaration = {
 const setCheckInPreferenceLiveTool: FunctionDeclaration = {
   name: 'setCheckInPreference',
   description:
-    'Updates whether Sora should automatically check in on the user and after how many minutes.',
+    'Starts or stops the automatic check-in timer and sets its interval in minutes.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       enabled: {
         type: Type.BOOLEAN,
-        description: 'True to enable automatic periodic check-ins, false to disable.',
+        description: 'True to start automatic periodic check-ins, false to stop them.',
       },
       intervalMinutes: {
         type: Type.NUMBER,
@@ -124,6 +167,30 @@ const setCheckInPreferenceLiveTool: FunctionDeclaration = {
       },
     },
     required: ['enabled'],
+  },
+};
+
+const controlTimerLiveTool: FunctionDeclaration = {
+  name: 'controlTimer',
+  description:
+    'Starts, pauses, stops, or resets any of the three separate timers: focus, break, or checkin. Starting break automatically stops focus and checkin.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      timer: {
+        type: Type.STRING,
+        description: 'Which timer to control: "focus", "break", or "checkin".',
+      },
+      action: {
+        type: Type.STRING,
+        description: 'Action to perform: "start", "pause", "stop", or "reset".',
+      },
+      minutes: {
+        type: Type.NUMBER,
+        description: 'Optional duration in minutes (1 to 180) to set for that timer.',
+      },
+    },
+    required: ['timer', 'action'],
   },
 };
 
@@ -507,9 +574,10 @@ Recent conversation:
 ${conversationHistory}
 
 Respond to ${userName}'s latest message as Sora:
-1. If they describe goals, tasks, progress, finished items, or feeling stuck, populate taskActions (add_task, toggle_task, add_subtasks, set_focus) to update their To-Do list.
-2. If they mention wanting check-ins every X minutes (or turning check-ins on/off), populate checkInAction with { enabled, intervalMinutes }.
-3. If they have not yet picked a task or check-in cadence, warmly confirm what you updated and ask the missing piece briefly.`;
+1. If they describe goals, tasks, edits, deletions, progress, finished items, or feeling stuck, populate taskActions ("add_task", "edit_task", "delete_task", "toggle_task", "add_subtasks", "set_focus") to update their To-Do list.
+2. If they mention starting, stopping, pausing, or resetting Focus, Break, or Check-in timers, populate timerActions (e.g. { timer: "focus" | "break" | "checkin", action: "start" | "pause" | "stop" | "reset", minutes? }).
+3. If they mention wanting check-ins every X minutes (or turning check-ins on/off), populate checkInAction with { enabled, intervalMinutes } (or timerActions).
+4. Keep your reply concise (1-2 short sentences).`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
@@ -524,7 +592,7 @@ Respond to ${userName}'s latest message as Sora:
               reply: {
                 type: Type.STRING,
                 description:
-                  'Warm, concise, ADHD-friendly reply from Sora (1 to 3 sentences).',
+                  'Warm, concise, ADHD-friendly reply from Sora (1 to 2 short sentences).',
               },
               pose: {
                 type: Type.STRING,
@@ -541,20 +609,24 @@ Respond to ${userName}'s latest message as Sora:
                     action: {
                       type: Type.STRING,
                       description:
-                        'One of: "add_task", "add_subtasks", "toggle_task", "set_focus".',
+                        'One of: "add_task", "edit_task", "delete_task", "add_subtasks", "toggle_task", "set_focus".',
                     },
                     taskId: {
                       type: Type.STRING,
                       description:
-                        'Existing task id when adding subtasks, toggling, or setting focus.',
+                        'Existing task id when editing, deleting, adding subtasks, toggling, or setting focus.',
                     },
                     title: {
                       type: Type.STRING,
-                      description: 'Task title for add_task, or fallback title match.',
+                      description: 'Task title for add_task, or title match for edit_task/delete_task/toggle_task.',
+                    },
+                    newTitle: {
+                      type: Type.STRING,
+                      description: 'New task title for edit_task.',
                     },
                     estimatedMinutes: {
                       type: Type.NUMBER,
-                      description: 'Optional estimated minutes for add_task.',
+                      description: 'Optional estimated minutes for add_task or edit_task.',
                     },
                     subtasks: {
                       type: Type.ARRAY,
@@ -563,6 +635,29 @@ Respond to ${userName}'s latest message as Sora:
                     },
                   },
                   required: ['action'],
+                },
+              },
+              timerActions: {
+                type: Type.ARRAY,
+                description:
+                  'Controls for the three separate timers: focus, break, or checkin.',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    timer: {
+                      type: Type.STRING,
+                      description: '"focus", "break", or "checkin".',
+                    },
+                    action: {
+                      type: Type.STRING,
+                      description: '"start", "pause", "stop", or "reset".',
+                    },
+                    minutes: {
+                      type: Type.NUMBER,
+                      description: 'Optional new duration in minutes.',
+                    },
+                  },
+                  required: ['timer', 'action'],
                 },
               },
               checkInAction: {
@@ -592,6 +687,7 @@ Respond to ${userName}'s latest message as Sora:
             ? parsed.pose
             : 'speaking',
         taskActions: Array.isArray(parsed.taskActions) ? parsed.taskActions : [],
+        timerActions: Array.isArray(parsed.timerActions) ? parsed.timerActions : [],
         checkInAction: parsed.checkInAction ?? null,
       });
     } catch (err: unknown) {
@@ -727,6 +823,192 @@ Write a warm, grounded 1-2 sentence check-in:
     }
   });
 
+  // YouTube Playlist Extraction (parses full playlist items + titles + durations)
+  app.get('/api/youtube/playlist', async (req: Request, res: Response) => {
+    try {
+      const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+      const rawListId = typeof req.query.listId === 'string' ? req.query.listId.trim() : '';
+
+      let listId = rawListId;
+      if (!listId && rawUrl) {
+        try {
+          const parsedUrl = new URL(rawUrl);
+          listId = parsedUrl.searchParams.get('list')?.trim() ?? '';
+        } catch {
+          const match = rawUrl.match(/[?&]list=([A-Za-z0-9_-]+)/i);
+          if (match?.[1]) listId = match[1];
+        }
+      }
+
+      if (!listId || !/^[A-Za-z0-9_-]{6,128}$/.test(listId)) {
+        res.status(400).json({ error: 'Invalid or missing YouTube playlist ID.' });
+        return;
+      }
+
+      let playlistTitle = 'YouTube Study Playlist';
+      const itemsMap = new Map<
+        string,
+        { videoId: string; title: string; url: string; durationSeconds?: number }
+      >();
+
+      // 1. Try YouTube HTML ytInitialData extraction (supports 100+ items + durations)
+      try {
+        const htmlRes = await fetch(
+          `https://www.youtube.com/playlist?list=${encodeURIComponent(listId)}`,
+          {
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          }
+        );
+        if (htmlRes.ok) {
+          const html = await htmlRes.text();
+          const marker = 'var ytInitialData = ';
+          const startIdx = html.indexOf(marker);
+          if (startIdx !== -1) {
+            const jsonStart = html.indexOf('{', startIdx + marker.length);
+            if (jsonStart !== -1) {
+              let depth = 0;
+              let inStr = false;
+              let escaped = false;
+              let endIdx = -1;
+              for (let i = jsonStart; i < html.length; i++) {
+                const ch = html[i];
+                if (escaped) {
+                  escaped = false;
+                  continue;
+                }
+                if (ch === '\\' && inStr) {
+                  escaped = true;
+                  continue;
+                }
+                if (ch === '"') {
+                  inStr = !inStr;
+                  continue;
+                }
+                if (!inStr) {
+                  if (ch === '{') depth++;
+                  else if (ch === '}') {
+                    depth--;
+                    if (depth === 0) {
+                      endIdx = i + 1;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (endIdx > jsonStart) {
+                const data = JSON.parse(html.slice(jsonStart, endIdx)) as Record<string, unknown>;
+                const metaTitle = (
+                  data?.metadata as { playlistMetadataRenderer?: { title?: string } } | undefined
+                )?.playlistMetadataRenderer?.title;
+                if (typeof metaTitle === 'string' && metaTitle.trim()) {
+                  playlistTitle = metaTitle.trim();
+                }
+
+                const walk = (node: unknown) => {
+                  if (!node || typeof node !== 'object') return;
+                  if (Array.isArray(node)) {
+                    for (const entry of node) walk(entry);
+                    return;
+                  }
+                  const obj = node as Record<string, unknown>;
+                  const pvr = (obj.playlistVideoRenderer ??
+                    obj.playlistPanelVideoRenderer) as
+                    | {
+                        videoId?: string;
+                        title?: { runs?: Array<{ text?: string }>; simpleText?: string };
+                        lengthSeconds?: string;
+                      }
+                    | undefined;
+                  if (pvr && typeof pvr.videoId === 'string' && pvr.videoId.length === 11) {
+                    const title =
+                      pvr.title?.runs?.[0]?.text ??
+                      pvr.title?.simpleText ??
+                      `Playlist Video ${itemsMap.size + 1}`;
+                    const lenNum = pvr.lengthSeconds ? Number(pvr.lengthSeconds) : undefined;
+                    if (!itemsMap.has(pvr.videoId)) {
+                      itemsMap.set(pvr.videoId, {
+                        videoId: pvr.videoId,
+                        title: title.trim(),
+                        url: `https://www.youtube.com/watch?v=${pvr.videoId}`,
+                        durationSeconds:
+                          typeof lenNum === 'number' && Number.isFinite(lenNum) && lenNum > 0
+                            ? lenNum
+                            : undefined,
+                      });
+                    }
+                  }
+                  for (const key of Object.keys(obj)) {
+                    walk(obj[key]);
+                  }
+                };
+                walk(data);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Playlist HTML parse fallback to RSS:', err);
+      }
+
+      // 2. Fallback / supplement via YouTube public Atom XML feed
+      if (itemsMap.size === 0) {
+        try {
+          const rssRes = await fetch(
+            `https://www.youtube.com/feeds/videos.xml?playlist_id=${encodeURIComponent(listId)}`
+          );
+          if (rssRes.ok) {
+            const xml = await rssRes.text();
+            const feedTitleMatch = xml.match(/<feed[^>]*>[\s\S]*?<title>([\s\S]*?)<\/title>/);
+            if (feedTitleMatch?.[1]) {
+              playlistTitle = feedTitleMatch[1]
+                .replace(/&amp;/g, '&')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&quot;/g, '"')
+                .trim();
+            }
+            const entryMatches = xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g);
+            for (const match of entryMatches) {
+              const block = match[1];
+              const vidMatch = block.match(/<yt:videoId>([A-Za-z0-9_-]{11})<\/yt:videoId>/);
+              const titleMatch = block.match(/<title>([\s\S]*?)<\/title>/);
+              if (vidMatch?.[1] && !itemsMap.has(vidMatch[1])) {
+                const decodedTitle = (titleMatch?.[1] ?? `Playlist Video ${itemsMap.size + 1}`)
+                  .replace(/&amp;/g, '&')
+                  .replace(/&lt;/g, '<')
+                  .replace(/&gt;/g, '>')
+                  .replace(/&quot;/g, '"')
+                  .trim();
+                itemsMap.set(vidMatch[1], {
+                  videoId: vidMatch[1],
+                  title: decodedTitle,
+                  url: `https://www.youtube.com/watch?v=${vidMatch[1]}`,
+                });
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('Playlist RSS fallback failed:', err);
+        }
+      }
+
+      const items = Array.from(itemsMap.values());
+      res.json({
+        listId,
+        playlistTitle,
+        items,
+        nativePlaylistFallback: items.length === 0,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to load YouTube playlist';
+      res.status(500).json({ error: message });
+    }
+  });
+
   // HTTP server shared by Express, /api/live, and /api/room
   const server = http.createServer(app);
   const liveWss = new WebSocketServer({ noServer: true });
@@ -742,6 +1024,8 @@ Write a warm, grounded 1-2 sentence check-in:
       roomWss.handleUpgrade(request, socket, head, (ws) => {
         roomWss.emit('connection', ws, request);
       });
+    } else {
+      socket.destroy();
     }
   });
 
@@ -910,14 +1194,25 @@ Write a warm, grounded 1-2 sentence check-in:
               prebuiltVoiceConfig: { voiceName: 'Kore' },
             },
           },
+          realtimeInputConfig: {
+            automaticActivityDetection: {
+              startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_HIGH,
+              endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_HIGH,
+              prefixPaddingMs: 120,
+              silenceDurationMs: 450,
+            },
+          },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           tools: [
             {
               functionDeclarations: [
                 addTaskLiveTool,
+                editTaskLiveTool,
+                deleteTaskLiveTool,
                 completeTaskLiveTool,
                 addSubtasksLiveTool,
+                controlTimerLiveTool,
                 setCheckInPreferenceLiveTool,
               ],
             },
@@ -925,7 +1220,7 @@ Write a warm, grounded 1-2 sentence check-in:
           systemInstruction: `${SORA_SYSTEM_INSTRUCTION}
 You are in a live real-time voice body-doubling conversation with ${userName} inside their "${cardTitle}" study card.
 Speak naturally, warmly, and briefly—like a calm friend sitting across the desk.
-Always use addTask, completeTask, addSubtasks, and setCheckInPreference tools to keep their To-Do list and check-in interval synced with what they tell you.`,
+Always use your tools (addTask, editTask, deleteTask, completeTask, addSubtasks, controlTimer, setCheckInPreference) to keep their To-Do list and three timers (focus, break, checkin) synced with what they tell you.`,
         },
         callbacks: {
           onmessage: (message: LiveServerMessage) => {
@@ -976,14 +1271,20 @@ Always use addTask, completeTask, addSubtasks, and setCheckInPreference tools to
                   name: call.name,
                   args: call.args ?? {},
                 });
+                let resultMsg = 'Updated live To-Do list successfully.';
+                if (call.name === 'setCheckInPreference' || call.name === 'controlTimer') {
+                  resultMsg =
+                    'Timer action registered. If starting a timer, tell the user briefly right now (e.g. "Now your timer starts.") and pause speaking so the full timer runs cleanly right after your voice finishes.';
+                } else if (call.name === 'editTask') {
+                  resultMsg = 'Edited the task on the To-Do list successfully.';
+                } else if (call.name === 'deleteTask') {
+                  resultMsg = 'Deleted the task from the To-Do list successfully.';
+                }
                 return {
                   id: call.id,
                   name: call.name,
                   response: {
-                    result:
-                      call.name === 'setCheckInPreference'
-                        ? 'Updated automatic check-in schedule successfully.'
-                        : 'Updated live To-Do list successfully.',
+                    result: resultMsg,
                   },
                 };
               });
@@ -1038,6 +1339,17 @@ Always use addTask, completeTask, addSubtasks, and setCheckInPreference tools to
           liveSession.sendRealtimeInput({
             audioStreamEnd: true,
           });
+        } else if (msg.type === 'context' && msg.text) {
+          // Silent context sync (e.g. after reconnect or UI state updates) without interrupting
+          liveSession.sendClientContent({
+            turns: [
+              {
+                role: 'user',
+                parts: [{ text: msg.text }],
+              },
+            ],
+            turnComplete: false,
+          });
         } else if (msg.type === 'text' && msg.text) {
           // Use sendClientContent with turnComplete: true so Gemini Live immediately generates a spoken turn
           liveSession.sendClientContent({
@@ -1057,13 +1369,36 @@ Always use addTask, completeTask, addSubtasks, and setCheckInPreference tools to
     });
   });
 
+  let viteClose: (() => Promise<void>) | null = null;
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
+    let viteInstance: Awaited<ReturnType<typeof createViteServer>> | null = null;
+    const vitePromise = createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: 'spa',
+    })
+      .then((v) => {
+        viteInstance = v;
+        viteClose = () => v.close();
+        return v;
+      })
+      .catch((err) => {
+        console.error('Failed to initialize Vite dev middleware:', err);
+        throw err;
+      });
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = viteInstance ?? (await vitePromise);
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
     });
-    app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
@@ -1072,9 +1407,36 @@ Always use addTask, completeTask, addSubtasks, and setCheckInPreference tools to
     });
   }
 
+  server.on('error', (err) => {
+    console.error('HTTP server error:', err);
+    process.exit(1);
+  });
+
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`FocusPair server running on http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = async () => {
+    try {
+      await viteClose?.();
+    } catch {
+      // Ignore Vite close errors
+    }
+    try {
+      liveWss.close();
+      roomWss.close();
+      server.close(() => process.exit(0));
+    } catch {
+      process.exit(0);
+    }
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Fatal server startup error:', err);
+  process.exit(1);
+});

@@ -20,15 +20,20 @@ interface UseLiveVoiceOptions {
 function downsampleTo16k(input: Float32Array, sourceRate: number): Float32Array {
   if (sourceRate === 16000 || sourceRate <= 0) return input;
   const ratio = sourceRate / 16000;
-  const newLength = Math.max(1, Math.round(input.length / ratio));
+  const newLength = Math.max(1, Math.floor(input.length / ratio));
   const result = new Float32Array(newLength);
   for (let i = 0; i < newLength; i++) {
-    const pos = i * ratio;
-    const idx = Math.floor(pos);
-    const frac = pos - idx;
-    const s0 = input[Math.min(idx, input.length - 1)];
-    const s1 = input[Math.min(idx + 1, input.length - 1)];
-    result[i] = s0 + (s1 - s0) * frac;
+    const start = Math.floor(i * ratio);
+    const end = Math.min(input.length, Math.floor((i + 1) * ratio));
+    if (end <= start) {
+      result[i] = input[Math.min(start, input.length - 1)] ?? 0;
+    } else {
+      let sum = 0;
+      for (let j = start; j < end; j++) {
+        sum += input[j];
+      }
+      result[i] = sum / (end - start);
+    }
   }
   return result;
 }
@@ -81,10 +86,12 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const silentGainRef = useRef<GainNode | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const isMutedRef = useRef(false);
   const wantLiveRef = useRef(false);
+  const isServerReadyRef = useRef(false);
   const hasConnectedOnceRef = useRef(false);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -104,7 +111,11 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
 
     const sample = () => {
       const ctx = outputCtxRef.current;
-      if (ctx && activeSourcesRef.current.size > 0 && ctx.currentTime > nextStartTimeRef.current + 0.6) {
+      if (
+        ctx &&
+        activeSourcesRef.current.size > 0 &&
+        ctx.currentTime > nextStartTimeRef.current + 0.55
+      ) {
         activeSourcesRef.current.clear();
         setIsAssistantSpeaking(false);
         return;
@@ -128,6 +139,25 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
     return () => window.cancelAnimationFrame(rafId);
   }, [isAssistantSpeaking]);
 
+  // Keep AudioContexts awake when returning from background tabs
+  useEffect(() => {
+    const resumeAudio = () => {
+      if (!wantLiveRef.current) return;
+      if (inputCtxRef.current?.state === 'suspended') {
+        inputCtxRef.current.resume().catch(() => {});
+      }
+      if (outputCtxRef.current?.state === 'suspended') {
+        outputCtxRef.current.resume().catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', resumeAudio);
+    window.addEventListener('focus', resumeAudio);
+    return () => {
+      document.removeEventListener('visibilitychange', resumeAudio);
+      window.removeEventListener('focus', resumeAudio);
+    };
+  }, []);
+
   const clearScheduledAudio = useCallback(() => {
     for (const src of activeSourcesRef.current) {
       try {
@@ -148,7 +178,11 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
 
   const stopVoice = useCallback(() => {
     wantLiveRef.current = false;
+    isServerReadyRef.current = false;
     hasConnectedOnceRef.current = false;
+    isMutedRef.current = false;
+    setIsMuted(false);
+
     if (reconnectTimerRef.current) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -163,6 +197,11 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
       processorRef.current = null;
     }
 
+    if (silentGainRef.current) {
+      silentGainRef.current.disconnect();
+      silentGainRef.current = null;
+    }
+
     if (sourceNodeRef.current) {
       sourceNodeRef.current.disconnect();
       sourceNodeRef.current = null;
@@ -170,6 +209,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
 
     if (mediaStreamRef.current) {
       for (const track of mediaStreamRef.current.getTracks()) {
+        track.onended = null;
         track.stop();
       }
       mediaStreamRef.current = null;
@@ -243,6 +283,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
 
   const openLiveSocket = useCallback(() => {
     if (!wantLiveRef.current) return;
+    isServerReadyRef.current = false;
     if (reconnectTimerRef.current) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -259,6 +300,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
     const scheduleReconnect = () => {
       if (!wantLiveRef.current) return;
       if (reconnectTimerRef.current) return;
+      isServerReadyRef.current = false;
       if (reconnectAttemptsRef.current >= 10) {
         setErrorMessage('Live voice disconnected. Tap Talk Live to reconnect.');
         setStatus('error');
@@ -266,7 +308,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
       }
       reconnectAttemptsRef.current += 1;
       setStatus('connecting');
-      const delay = Math.min(3000, reconnectAttemptsRef.current * 600);
+      const delay = Math.min(2500, reconnectAttemptsRef.current * 450);
       reconnectTimerRef.current = window.setTimeout(() => {
         reconnectTimerRef.current = null;
         openLiveSocket();
@@ -287,6 +329,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
         if (msg.type === 'ready') {
           const isReconnect = hasConnectedOnceRef.current;
           hasConnectedOnceRef.current = true;
+          isServerReadyRef.current = true;
           reconnectAttemptsRef.current = 0;
           setErrorMessage(null);
           setStatus('live');
@@ -307,7 +350,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
         } else if (msg.type === 'turn_complete') {
           callbacksRef.current.onTurnComplete?.();
         } else if (msg.type === 'go_away' || msg.type === 'closed') {
-          // Live session rotated or closed upstream: seamlessly open a fresh session
+          isServerReadyRef.current = false;
           if (wsRef.current === ws) {
             wsRef.current = null;
           }
@@ -318,6 +361,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
           }
           scheduleReconnect();
         } else if (msg.type === 'error') {
+          isServerReadyRef.current = false;
           setErrorMessage(msg.message ?? 'Voice connection interrupted.');
           if (wantLiveRef.current && reconnectAttemptsRef.current < 10) {
             scheduleReconnect();
@@ -336,6 +380,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
     };
 
     ws.onclose = () => {
+      isServerReadyRef.current = false;
       if (wsRef.current === ws) {
         wsRef.current = null;
       }
@@ -351,6 +396,9 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
     if (status === 'connecting' || status === 'live') return;
     setErrorMessage(null);
     setStatus('connecting');
+    isMutedRef.current = false;
+    setIsMuted(false);
+    isServerReadyRef.current = false;
     wantLiveRef.current = true;
     hasConnectedOnceRef.current = false;
     reconnectAttemptsRef.current = 0;
@@ -364,6 +412,15 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
         },
       });
       mediaStreamRef.current = stream;
+
+      const audioTrack = stream.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.onended = () => {
+          if (wantLiveRef.current) {
+            setErrorMessage('Microphone disconnected. Tap Talk Live to reconnect.');
+          }
+        };
+      }
 
       const inputCtx = new AudioContext({ sampleRate: 16000 });
       const outputCtx = new AudioContext({ sampleRate: 24000 });
@@ -386,14 +443,22 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
       openLiveSocket();
 
       const source = inputCtx.createMediaStreamSource(stream);
-      const processor = inputCtx.createScriptProcessor(4096, 1, 1);
+      const processor = inputCtx.createScriptProcessor(2048, 1, 1);
+      const silentGain = inputCtx.createGain();
+      silentGain.gain.value = 0;
+
       sourceNodeRef.current = source;
       processorRef.current = processor;
+      silentGainRef.current = silentGain;
 
       source.connect(processor);
-      processor.connect(inputCtx.destination);
+      processor.connect(silentGain);
+      silentGain.connect(inputCtx.destination);
 
       processor.onaudioprocess = (e) => {
+        if (inputCtx.state === 'suspended') {
+          inputCtx.resume().catch(() => {});
+        }
         const channel = e.inputBuffer.getChannelData(0);
 
         let sum = 0;
@@ -403,7 +468,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
         const rms = Math.sqrt(sum / (channel.length / 4));
         setAudioLevel(isMutedRef.current ? 0 : Math.min(1, rms * 6));
 
-        if (isMutedRef.current) return;
+        if (isMutedRef.current || !isServerReadyRef.current) return;
         const currentWs = wsRef.current;
         if (currentWs && currentWs.readyState === WebSocket.OPEN) {
           const pcm16k = downsampleTo16k(channel, inputCtx.sampleRate);
@@ -443,9 +508,21 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
   }, []);
 
   const sendTextPrompt = useCallback((text: string): boolean => {
+    if (outputCtxRef.current?.state === 'suspended') {
+      outputCtxRef.current.resume().catch(() => {});
+    }
     const currentWs = wsRef.current;
-    if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+    if (currentWs && currentWs.readyState === WebSocket.OPEN && isServerReadyRef.current) {
       currentWs.send(JSON.stringify({ type: 'text', text }));
+      return true;
+    }
+    return false;
+  }, []);
+
+  const sendContextUpdate = useCallback((text: string): boolean => {
+    const currentWs = wsRef.current;
+    if (currentWs && currentWs.readyState === WebSocket.OPEN && isServerReadyRef.current) {
+      currentWs.send(JSON.stringify({ type: 'context', text }));
       return true;
     }
     return false;
@@ -453,6 +530,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
 
   const reconnectLive = useCallback(() => {
     if (!wantLiveRef.current) return;
+    isServerReadyRef.current = false;
     if (wsRef.current) {
       try {
         wsRef.current.close();
@@ -483,6 +561,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions = {}) {
     stopVoice,
     toggleMute,
     sendTextPrompt,
+    sendContextUpdate,
     reconnectLive,
   };
 }
