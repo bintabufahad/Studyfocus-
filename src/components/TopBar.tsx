@@ -24,7 +24,7 @@ export function TopBar({
   logsCount,
 }: TopBarProps) {
   return (
-    <header className="fp-topbar relative z-20 mx-auto flex w-full shrink-0 items-center justify-between gap-4 px-5 py-2.5 sm:px-8">
+    <header className="fp-topbar relative z-20 mx-auto flex w-full shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2.5 sm:px-6 lg:px-8">
       {/* Left: Crisp FocusPair wordmark */}
       <button
         type="button"
@@ -35,8 +35,8 @@ export function TopBar({
       </button>
 
       {/* Right: Concise single-line navigation links + workspace action when inside a session */}
-      <div className="flex items-center gap-5 sm:gap-7">
-        <nav aria-label="Primary" className="flex items-center gap-4 sm:gap-6">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:gap-x-6">
+        <nav aria-label="Primary" className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 sm:gap-x-6">
           <button
             type="button"
             onClick={() => onSelectView('hub')}
@@ -62,6 +62,18 @@ export function TopBar({
               {activeCardTitle}
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => onSelectView('goals')}
+            className={`cursor-pointer text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-300 ${
+              activeView === 'goals'
+                ? 'text-cyan-300 underline decoration-cyan-300 decoration-2 underline-offset-8 drop-shadow-[0_0_8px_rgba(103,232,249,0.5)]'
+                : 'text-slate-300/80 hover:text-cyan-100'
+            }`}
+          >
+            Goals
+          </button>
 
           <button
             type="button"

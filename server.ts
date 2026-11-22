@@ -252,6 +252,10 @@ interface StoredAccount {
   passwordSalt: string;
   passwordHash: string;
   studyCards: unknown[];
+  goals?: unknown[];
+  activeDailyPlan?: Record<string, unknown>;
+  dailyHistory?: unknown[];
+  gamification?: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
 }
@@ -398,6 +402,18 @@ async function startServer() {
     const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
     const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
     const initialCards = Array.isArray(req.body?.studyCards) ? req.body.studyCards : [];
+    const initialGoals = Array.isArray(req.body?.goals) ? req.body.goals : [];
+    const initialDailyPlan =
+      req.body?.activeDailyPlan && typeof req.body.activeDailyPlan === 'object'
+        ? (req.body.activeDailyPlan as Record<string, unknown>)
+        : undefined;
+    const initialDailyHistory = Array.isArray(req.body?.dailyHistory)
+      ? req.body.dailyHistory
+      : [];
+    const initialGamification =
+      req.body?.gamification && typeof req.body.gamification === 'object'
+        ? (req.body.gamification as Record<string, unknown>)
+        : undefined;
 
     if (rawUsername.length < 2 || rawUsername.length > 40) {
       res.status(400).json({ error: 'Name must be between 2 and 40 characters.' });
@@ -425,6 +441,10 @@ async function startServer() {
       passwordSalt: salt,
       passwordHash: hash,
       studyCards: initialCards,
+      goals: initialGoals,
+      ...(initialDailyPlan ? { activeDailyPlan: initialDailyPlan } : {}),
+      dailyHistory: initialDailyHistory,
+      ...(initialGamification ? { gamification: initialGamification } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -441,6 +461,10 @@ async function startServer() {
         createdAt: account.createdAt,
         updatedAt: account.updatedAt,
         studyCards: account.studyCards,
+        goals: account.goals ?? [],
+        activeDailyPlan: account.activeDailyPlan,
+        dailyHistory: account.dailyHistory ?? [],
+        gamification: account.gamification,
       },
     });
   });
@@ -465,6 +489,10 @@ async function startServer() {
         createdAt: account.createdAt,
         updatedAt: account.updatedAt,
         studyCards: account.studyCards,
+        goals: account.goals ?? [],
+        activeDailyPlan: account.activeDailyPlan,
+        dailyHistory: account.dailyHistory ?? [],
+        gamification: account.gamification,
       },
     });
   });
@@ -484,6 +512,10 @@ async function startServer() {
         createdAt: account.createdAt,
         updatedAt: account.updatedAt,
         studyCards: account.studyCards,
+        goals: account.goals ?? [],
+        activeDailyPlan: account.activeDailyPlan,
+        dailyHistory: account.dailyHistory ?? [],
+        gamification: account.gamification,
       },
     });
   });
@@ -504,6 +536,18 @@ async function startServer() {
     }
 
     account.studyCards = req.body.studyCards;
+    if (Array.isArray(req.body?.goals)) {
+      account.goals = req.body.goals;
+    }
+    if (req.body?.activeDailyPlan && typeof req.body.activeDailyPlan === 'object') {
+      account.activeDailyPlan = req.body.activeDailyPlan as Record<string, unknown>;
+    }
+    if (Array.isArray(req.body?.dailyHistory)) {
+      account.dailyHistory = req.body.dailyHistory;
+    }
+    if (req.body?.gamification && typeof req.body.gamification === 'object') {
+      account.gamification = req.body.gamification as Record<string, unknown>;
+    }
     account.updatedAt = Date.now();
     accountStore.set(account.usernameLower, account);
     saveAccountsToDisk();

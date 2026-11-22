@@ -255,8 +255,90 @@
         animation: gentle-breathe 12s ease-in-out infinite;
       }
 
+      /* Gamified Goals Arena Surfaces & Micro-Animations */
+      .goal-number-node {
+        background: linear-gradient(145deg, rgba(14, 42, 58, 0.78), rgba(6, 20, 32, 0.88));
+        border: 1px solid rgba(111, 240, 255, 0.28);
+        box-shadow: 0 0 18px rgba(56, 225, 248, 0.12);
+        transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+      }
+
+      .goal-number-node-done {
+        background: linear-gradient(135deg, rgba(56, 225, 248, 0.25), rgba(251, 198, 78, 0.26));
+        border-color: rgba(111, 240, 255, 0.65);
+        box-shadow:
+          0 0 22px rgba(78, 235, 255, 0.28),
+          0 0 14px rgba(251, 198, 78, 0.22);
+      }
+
+      .goal-number-node-missed {
+        background: rgba(34, 24, 14, 0.68);
+        border-color: rgba(251, 191, 36, 0.36);
+      }
+
+      .goal-rect-bar {
+        background: rgba(6, 22, 34, 0.56);
+        border: 1px solid rgba(125, 225, 242, 0.18);
+        transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+      }
+
+      .goal-rect-bar:hover,
+      .goal-rect-bar:focus-within {
+        border-color: rgba(111, 240, 255, 0.44);
+        background: rgba(8, 28, 42, 0.68);
+        box-shadow: 0 0 20px rgba(56, 225, 248, 0.12);
+      }
+
+      .goal-rect-bar-done {
+        background: linear-gradient(
+          90deg,
+          rgba(34, 211, 238, 0.12) 0%,
+          rgba(251, 191, 36, 0.08) 100%
+        );
+        border-color: rgba(103, 232, 249, 0.38);
+      }
+
+      .goal-rect-bar-missed {
+        background: rgba(26, 20, 14, 0.48);
+        border-color: rgba(251, 191, 36, 0.28);
+      }
+
+      .goal-carryover-slot {
+        background: linear-gradient(
+          135deg,
+          rgba(42, 29, 14, 0.58) 0%,
+          rgba(12, 28, 40, 0.62) 100%
+        );
+        border: 1px dashed rgba(251, 191, 36, 0.45);
+        box-shadow: 0 6px 20px -10px rgba(251, 191, 36, 0.28);
+      }
+
+      @keyframes xp-float-up {
+        0% {
+          opacity: 0;
+          transform: translateY(8px) scale(0.92);
+        }
+        20% {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+        80% {
+          opacity: 1;
+          transform: translateY(-16px) scale(1);
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-28px) scale(0.96);
+        }
+      }
+
+      .animate-xp-float {
+        animation: xp-float-up 1.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+      }
+
       @media (prefers-reduced-motion: reduce) {
-        .animate-gentle-breathe {
+        .animate-gentle-breathe,
+        .animate-xp-float {
           animation: none;
         }
       }

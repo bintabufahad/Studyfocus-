@@ -180,10 +180,10 @@ export function SessionTimerBar({
       </div>
 
       {/* Row 2: Three Separate Timers (Focus | Break | Check-in) */}
-      <div className="grid grid-cols-1 gap-1.5 px-3 py-1.5 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-2 px-3 py-2 sm:grid-cols-2 xl:grid-cols-3">
         {/* 1. Focus Timer */}
         <div
-          className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1 transition-all ${
+          className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 transition-all ${
             isFocusRunning
               ? 'border-amber-300/45 bg-gradient-to-r from-amber-400/[0.12] to-cyan-400/[0.05] shadow-[0_0_16px_rgba(251,191,36,0.12)]'
               : 'border-cyan-200/[0.1] bg-[#040814]/70'
@@ -195,8 +195,8 @@ export function SessionTimerBar({
                 isFocusRunning ? 'text-amber-300' : 'text-slate-400'
               }`}
             />
-            <span className="text-[11px] font-medium text-slate-300">Focus</span>
-            <span className="font-mono-tabular text-sm font-semibold text-slate-100">
+            <span className="text-[11px] font-medium text-slate-300 shrink-0">Focus</span>
+            <span className="font-mono-tabular text-sm font-semibold text-slate-100 whitespace-nowrap">
               {formatClock(focusRemainingSeconds)}
             </span>
           </div>
@@ -228,7 +228,7 @@ export function SessionTimerBar({
 
         {/* 2. Break Timer (Starting Break auto-stops Focus & Check-in) */}
         <div
-          className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1 transition-all ${
+          className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 transition-all ${
             isBreakRunning
               ? 'border-cyan-300/45 bg-cyan-400/[0.12] shadow-[0_0_16px_rgba(34,211,238,0.14)]'
               : 'border-cyan-200/[0.1] bg-[#040814]/70'
@@ -240,8 +240,8 @@ export function SessionTimerBar({
                 isBreakRunning ? 'text-cyan-300' : 'text-slate-400'
               }`}
             />
-            <span className="text-[11px] font-medium text-slate-300">Break</span>
-            <span className="font-mono-tabular text-sm font-semibold text-slate-100">
+            <span className="text-[11px] font-medium text-slate-300 shrink-0">Break</span>
+            <span className="font-mono-tabular text-sm font-semibold text-slate-100 whitespace-nowrap">
               {formatClock(breakRemainingSeconds)}
             </span>
           </div>
@@ -271,21 +271,23 @@ export function SessionTimerBar({
           </div>
         </div>
 
-        {/* 3. Check-in Timer (Off by default until user allows/starts) */}
+        {/* 3. Check-in Timer (Full width on tablet sm..lg, 1/3 column on xl desktop) */}
         <div
-          className={`flex items-center justify-between gap-1.5 rounded-lg border px-2.5 py-1 transition-all ${
+          className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 transition-all sm:col-span-2 xl:col-span-1 ${
             isCheckInRunning || isCheckInStaged
               ? 'border-teal-300/40 bg-gradient-to-r from-cyan-400/[0.09] to-teal-400/[0.1] shadow-[0_0_16px_rgba(45,212,191,0.12)]'
               : 'border-cyan-200/[0.1] bg-[#040814]/70'
           }`}
         >
-          <div className="flex items-center gap-1.5 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0 shrink-0">
             {isCheckInRunning || isCheckInStaged ? (
               <Bell className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
             ) : (
               <BellOff className="h-3.5 w-3.5 shrink-0 text-slate-500" />
             )}
-            <span className="text-[11px] font-medium text-slate-300 shrink-0">Check-in</span>
+            <span className="text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0">
+              Check-in
+            </span>
             <input
               type="number"
               min={1}
@@ -298,26 +300,27 @@ export function SessionTimerBar({
                   checkInMinutes: Math.max(1, Math.min(180, Number(e.target.value) || 1)),
                 })
               }
-              className="bio-input font-mono-tabular h-5 w-9 rounded px-0.5 text-center text-[11px]"
+              className="bio-input font-mono-tabular h-6 w-9 shrink-0 rounded px-1 text-center text-[11px]"
             />
-            <span className="text-[10px] text-slate-400">m</span>
+            <span className="text-[10px] text-slate-400 shrink-0">m</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
             {isCheckInStaged ? (
-              <span className="text-[10px] font-medium text-cyan-200 whitespace-nowrap">
+              <span className="rounded border border-cyan-300/35 bg-cyan-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-100 whitespace-nowrap">
                 Armed
               </span>
             ) : isCheckInRunning ? (
               <span
                 aria-label="Time left until next AI check-in"
-                className="font-mono-tabular text-xs font-semibold text-cyan-200 whitespace-nowrap"
+                className="font-mono-tabular rounded border border-cyan-300/35 bg-cyan-400/15 px-1.5 py-0.5 text-xs font-bold text-cyan-100 whitespace-nowrap"
               >
                 {formatClock(secondsUntilAlert)}
               </span>
             ) : (
-              <span className="text-[11px] text-slate-500">Off</span>
+              <span className="px-1 text-[11px] text-slate-500 whitespace-nowrap">Off</span>
             )}
-          </div>
 
-          <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
               onClick={onToggleCheckIn}

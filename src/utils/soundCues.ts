@@ -1,4 +1,11 @@
-export type CueType = 'sprint_end' | 'break_end' | 'reminder' | 'checkin';
+export type CueType =
+  | 'sprint_end'
+  | 'break_end'
+  | 'reminder'
+  | 'checkin'
+  | 'goal_tick'
+  | 'goal_levelup'
+  | 'goal_carryover';
 
 export function playCueSound(type: CueType): void {
   try {
@@ -25,6 +32,20 @@ export function playCueSound(type: CueType): void {
       checkin: [
         { freq: 523.25, delay: 0, dur: 0.7, vol: 0.07 },
         { freq: 659.25, delay: 0.16, dur: 0.85, vol: 0.06 },
+      ],
+      goal_tick: [
+        { freq: 587.33, delay: 0, dur: 0.22, vol: 0.06 },
+        { freq: 880.0, delay: 0.07, dur: 0.35, vol: 0.07 },
+      ],
+      goal_levelup: [
+        { freq: 523.25, delay: 0, dur: 0.3, vol: 0.07 },
+        { freq: 659.25, delay: 0.09, dur: 0.32, vol: 0.07 },
+        { freq: 783.99, delay: 0.18, dur: 0.4, vol: 0.08 },
+        { freq: 1046.5, delay: 0.28, dur: 0.75, vol: 0.08 },
+      ],
+      goal_carryover: [
+        { freq: 440.0, delay: 0, dur: 0.24, vol: 0.05 },
+        { freq: 392.0, delay: 0.1, dur: 0.35, vol: 0.05 },
       ],
     };
 

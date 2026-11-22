@@ -1,5 +1,16 @@
 import type {
   ActiveTimerSnapshot,
+  DailyPlanRecord,
+  GamificationStats,
+  GoalCadence,
+  GoalPhaseKind,
+  GoalPlan,
+  GoalStep,
+  GoalTaskEntry,
+  GoalUnit,
+  PhaseConfig,
+  PriorityDeadline,
+  SalahName,
   SessionLog,
   StudySessionCard,
   TaskItem,
@@ -43,14 +54,361 @@ export function createStudyCard(
   };
 }
 
+export const DEFAULT_GAMIFICATION_STATS: GamificationStats = {
+  xp: 0,
+  combo: 0,
+  bestCombo: 0,
+  shields: 1,
+  rescuesCompleted: 0,
+  totalStepsCompleted: 0,
+  unlockedBadges: [],
+};
+
 export function createNewProfile(name: string, id?: string, isCloudAccount = false): UserProfile {
   return {
     id: id ?? `prof-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     name: name.trim() || 'Guest',
     createdAt: Date.now(),
     studyCards: [],
+    goals: [],
+    gamification: { ...DEFAULT_GAMIFICATION_STATS },
     isCloudAccount,
   };
+}
+
+export function normalizeGamification(raw: unknown): GamificationStats {
+  if (!raw || typeof raw !== 'object') {
+    return { ...DEFAULT_GAMIFICATION_STATS };
+  }
+  const r = raw as Partial<GamificationStats>;
+  return {
+    xp: typeof r.xp === 'number' && r.xp >= 0 ? r.xp : 0,
+    combo: typeof r.combo === 'number' && r.combo >= 0 ? r.combo : 0,
+    bestCombo: typeof r.bestCombo === 'number' && r.bestCombo >= 0 ? r.bestCombo : 0,
+    shields: typeof r.shields === 'number' && r.shields >= 0 ? r.shields : 0,
+    rescuesCompleted:
+      typeof r.rescuesCompleted === 'number' && r.rescuesCompleted >= 0
+        ? r.rescuesCompleted
+        : 0,
+    totalStepsCompleted:
+      typeof r.totalStepsCompleted === 'number' && r.totalStepsCompleted >= 0
+        ? r.totalStepsCompleted
+        : 0,
+    unlockedBadges: Array.isArray(r.unlockedBadges)
+      ? r.unlockedBadges.filter((b): b is string => typeof b === 'string')
+      : [],
+  };
+}
+
+function makeEntryId(prefix = 't'): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function createDefaultStepEntries(): {
+  priorities: GoalTaskEntry[];
+  todos: GoalTaskEntry[];
+} {
+  return {
+    priorities: [{ id: makeEntryId('pri'), kind: 'priority', text: '', status: 'empty' }],
+    todos: [
+      { id: makeEntryId('todo'), kind: 'todo', text: '', status: 'empty' },
+      { id: makeEntryId('todo'), kind: 'todo', text: '', status: 'empty' },
+      { id: makeEntryId('todo'), kind: 'todo', text: '', status: 'empty' },
+    ],
+  };
+}
+
+export function createDefaultDailyEntries(): {
+  priorities: GoalTaskEntry[];
+  todos: GoalTaskEntry[];
+} {
+  return {
+    priorities: [
+      { id: makeEntryId('pri'), kind: 'priority', text: '', status: 'empty' },
+      { id: makeEntryId('pri'), kind: 'priority', text: '', status: 'empty' },
+      { id: makeEntryId('pri'), kind: 'priority', text: '', status: 'empty' },
+    ],
+    todos: [
+      { id: makeEntryId('todo'), kind: 'todo', text: '', status: 'empty' },
+      { id: makeEntryId('todo'), kind: 'todo', text: '', status: 'empty' },
+      { id: makeEntryId('todo'), kind: 'todo', text: '', status: 'empty' },
+      { id: makeEntryId('todo'), kind: 'todo', text: '', status: 'empty' },
+      { id: makeEntryId('todo'), kind: 'todo', text: '', status: 'empty' },
+    ],
+  };
+}
+
+export function createDefaultDailyPlan(dateKey = toLocalDateKey(Date.now())): DailyPlanRecord {
+  const { priorities, todos } = createDefaultDailyEntries();
+  const now = Date.now();
+  return {
+    dateKey,
+    priorities,
+    todos,
+    dismissedImportBanner: false,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function normalizeTaskEntries(
+  rawList: unknown,
+  kind: 'priority' | 'todo',
+  minDefaultSlots = 0
+): GoalTaskEntry[] {
+  const validSalahs: SalahName[] = ['Fajr', 'Zuhr', 'Asr', 'Maghrib', 'Isha'];
+  const items: GoalTaskEntry[] = Array.isArray(rawList)
+    ? rawList
+        .filter((item): item is GoalTaskEntry => Boolean(item && typeof item === 'object'))
+        .map((item) => {
+          const text = typeof item.text === 'string' ? item.text : '';
+          const status =
+            item.status === 'done' || item.status === 'missed' || item.status === 'pending'
+              ? item.status
+              : text.trim()
+                ? 'pending'
+                : 'empty';
+          let deadline: PriorityDeadline | undefined;
+          if (kind === 'priority' && item.deadline && typeof item.deadline === 'object') {
+            const d = item.deadline as Partial<PriorityDeadline>;
+            const mode =
+              d.mode === 'clock' || d.mode === 'hours' || d.mode === 'salah'
+                ? d.mode
+                : 'none';
+            deadline = {
+              mode,
+              clockTime: typeof d.clockTime === 'string' ? d.clockTime : undefined,
+              durationHours:
+                typeof d.durationHours === 'number' && d.durationHours > 0
+                  ? d.durationHours
+                  : undefined,
+              dueTimestamp:
+                typeof d.dueTimestamp === 'number' ? d.dueTimestamp : undefined,
+              salah:
+                d.salah && validSalahs.includes(d.salah as SalahName)
+                  ? (d.salah as SalahName)
+                  : undefined,
+            };
+          }
+          return {
+            id: typeof item.id === 'string' ? item.id : makeEntryId(kind === 'priority' ? 'pri' : 'todo'),
+            kind,
+            text,
+            status,
+            ...(deadline ? { deadline } : {}),
+            completedAt: typeof item.completedAt === 'number' ? item.completedAt : undefined,
+            missedAt: typeof item.missedAt === 'number' ? item.missedAt : undefined,
+          };
+        })
+    : [];
+
+  while (items.length < minDefaultSlots) {
+    items.push({
+      id: makeEntryId(kind === 'priority' ? 'pri' : 'todo'),
+      kind,
+      text: '',
+      status: 'empty',
+    });
+  }
+  return items;
+}
+
+export function normalizeDailyPlan(raw: unknown, fallbackDateKey?: string): DailyPlanRecord | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Partial<DailyPlanRecord>;
+  const dateKey =
+    typeof r.dateKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.dateKey)
+      ? r.dateKey
+      : fallbackDateKey ?? toLocalDateKey(Date.now());
+  return {
+    dateKey,
+    priorities: normalizeTaskEntries(r.priorities, 'priority', 3),
+    todos: normalizeTaskEntries(r.todos, 'todo', 5),
+    dismissedImportBanner: Boolean(r.dismissedImportBanner),
+    createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
+    updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : Date.now(),
+  };
+}
+
+export function normalizeDailyHistory(raw: unknown): DailyPlanRecord[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => normalizeDailyPlan(item))
+    .filter((item): item is DailyPlanRecord => Boolean(item))
+    .slice(0, 60);
+}
+
+export function rolloverExpiredDailyPlan(
+  activeDailyPlan: DailyPlanRecord | undefined,
+  dailyHistory: DailyPlanRecord[] | undefined,
+  todayKey = toLocalDateKey(Date.now())
+): {
+  activeDailyPlan: DailyPlanRecord;
+  dailyHistory: DailyPlanRecord[];
+  didRollover: boolean;
+} {
+  const existingHistory = Array.isArray(dailyHistory) ? [...dailyHistory] : [];
+  if (!activeDailyPlan) {
+    return {
+      activeDailyPlan: createDefaultDailyPlan(todayKey),
+      dailyHistory: existingHistory,
+      didRollover: false,
+    };
+  }
+  if (activeDailyPlan.dateKey === todayKey) {
+    return {
+      activeDailyPlan,
+      dailyHistory: existingHistory,
+      didRollover: false,
+    };
+  }
+
+  // Archive previous day's saved entries if any exist
+  const hasSavedTasks =
+    activeDailyPlan.priorities.some((p) => p.text.trim()) ||
+    activeDailyPlan.todos.some((t) => t.text.trim());
+
+  let nextHistory = existingHistory;
+  if (hasSavedTasks) {
+    const alreadyArchived = existingHistory.some((h) => h.dateKey === activeDailyPlan.dateKey);
+    if (!alreadyArchived) {
+      const archived: DailyPlanRecord = {
+        ...activeDailyPlan,
+        priorities: activeDailyPlan.priorities.filter((p) => p.text.trim()),
+        todos: activeDailyPlan.todos.filter((t) => t.text.trim()),
+      };
+      nextHistory = [archived, ...existingHistory]
+        .sort((a, b) => b.dateKey.localeCompare(a.dateKey))
+        .slice(0, 60);
+    }
+  }
+
+  return {
+    activeDailyPlan: createDefaultDailyPlan(todayKey),
+    dailyHistory: nextHistory,
+    didRollover: true,
+  };
+}
+
+export function normalizeGoals(rawGoals: unknown): GoalPlan[] {
+  if (!Array.isArray(rawGoals)) return [];
+  return rawGoals
+    .filter((g): g is GoalPlan => Boolean(g && typeof g === 'object' && 'id' in g))
+    .map((g) => {
+      const steps: GoalStep[] = Array.isArray(g.steps)
+        ? g.steps.map((s, idx) => {
+            const legacyText = typeof s.taskText === 'string' ? s.taskText : '';
+            const legacyStatus =
+              s.status === 'done' || s.status === 'missed' || s.status === 'pending'
+                ? s.status
+                : legacyText.trim()
+                  ? 'pending'
+                  : 'empty';
+
+            let priorities = Array.isArray(s.priorities)
+              ? normalizeTaskEntries(s.priorities, 'priority', 1)
+              : createDefaultStepEntries().priorities;
+            const todos = Array.isArray(s.todos)
+              ? normalizeTaskEntries(s.todos, 'todo', 3)
+              : createDefaultStepEntries().todos;
+
+            // Graceful migration if an older step only had taskText
+            if (!Array.isArray(s.priorities) && legacyText.trim()) {
+              priorities = [
+                {
+                  id: makeEntryId('pri'),
+                  kind: 'priority',
+                  text: legacyText.trim(),
+                  status: legacyStatus === 'empty' ? 'pending' : legacyStatus,
+                  completedAt: s.completedAt,
+                  missedAt: s.missedAt,
+                },
+                ...priorities.slice(1),
+              ];
+            }
+
+            return {
+              stepNumber: typeof s.stepNumber === 'number' ? s.stepNumber : idx + 1,
+              dateLabel: typeof s.dateLabel === 'string' ? s.dateLabel : undefined,
+              monthKey: typeof s.monthKey === 'string' ? s.monthKey : undefined,
+              phase:
+                s.phase === 'menstrual' ||
+                s.phase === 'follicular' ||
+                s.phase === 'ovulation' ||
+                s.phase === 'luteal'
+                  ? (s.phase as GoalPhaseKind)
+                  : undefined,
+              priorities,
+              todos,
+              taskText: legacyText,
+              status: legacyStatus,
+              completedAt: typeof s.completedAt === 'number' ? s.completedAt : undefined,
+              missedAt: typeof s.missedAt === 'number' ? s.missedAt : undefined,
+              carryovers: Array.isArray(s.carryovers)
+                ? s.carryovers.map((c) => ({
+                    id: typeof c.id === 'string' ? c.id : makeEntryId('co'),
+                    originStepNumber:
+                      typeof c.originStepNumber === 'number' ? c.originStepNumber : 1,
+                    kind: c.kind === 'todo' ? 'todo' : 'priority',
+                    text: typeof c.text === 'string' ? c.text : '',
+                    status:
+                      c.status === 'done' || c.status === 'pushed' ? c.status : 'pending',
+                    completedAt:
+                      typeof c.completedAt === 'number' ? c.completedAt : undefined,
+                  }))
+                : [],
+            };
+          })
+        : [];
+      const rawPc = g.phaseConfig as Partial<PhaseConfig> | undefined;
+      const phaseConfig: PhaseConfig | undefined =
+        rawPc && typeof rawPc === 'object'
+          ? {
+              cycleDates: Array.isArray(rawPc.cycleDates)
+                ? rawPc.cycleDates.filter((d): d is string => typeof d === 'string')
+                : [],
+              periodLengthDays:
+                typeof rawPc.periodLengthDays === 'number' && rawPc.periodLengthDays >= 2
+                  ? rawPc.periodLengthDays
+                  : 5,
+              averageCycleDays:
+                typeof rawPc.averageCycleDays === 'number' && rawPc.averageCycleDays >= 18
+                  ? rawPc.averageCycleDays
+                  : 28,
+              dataMode: rawPc.dataMode === '1month' ? '1month' : '3months',
+            }
+          : undefined;
+      return {
+        id: String(g.id),
+        title: typeof g.title === 'string' && g.title.trim() ? g.title : 'Untitled Goal',
+        cadence:
+          g.cadence === 'daily' ||
+          g.cadence === 'custom' ||
+          g.cadence === 'week' ||
+          g.cadence === 'month' ||
+          g.cadence === 'phase'
+            ? (g.cadence as GoalCadence)
+            : 'week',
+        unit:
+          g.unit === 'days' ||
+          g.unit === 'weeks' ||
+          g.unit === 'months' ||
+          g.unit === 'phase_days'
+            ? (g.unit as GoalUnit)
+            : 'days',
+        totalSteps: steps.length || (typeof g.totalSteps === 'number' ? g.totalSteps : 1),
+        startDate: typeof g.startDate === 'string' ? g.startDate : undefined,
+        endDate: typeof g.endDate === 'string' ? g.endDate : undefined,
+        startMonth: typeof g.startMonth === 'string' ? g.startMonth : undefined,
+        endMonth: typeof g.endMonth === 'string' ? g.endMonth : undefined,
+        ...(phaseConfig ? { phaseConfig } : {}),
+        accent: g.accent ?? 'sky',
+        steps,
+        trailingCarryovers: Array.isArray(g.trailingCarryovers) ? g.trailingCarryovers : [],
+        createdAt: typeof g.createdAt === 'number' ? g.createdAt : Date.now(),
+        updatedAt: typeof g.updatedAt === 'number' ? g.updatedAt : Date.now(),
+      };
+    });
 }
 
 export function normalizeStudyCards(rawCards: unknown[]): StudySessionCard[] {
@@ -111,11 +469,20 @@ function migrateProfile(raw: UserProfile): UserProfile {
     cards.push(migratedCard);
   }
 
+  const rolled = rolloverExpiredDailyPlan(
+    normalizeDailyPlan(raw.activeDailyPlan),
+    normalizeDailyHistory(raw.dailyHistory)
+  );
+
   return {
     id: raw.id,
     name: raw.name,
     createdAt: raw.createdAt ?? Date.now(),
     studyCards: cards,
+    goals: normalizeGoals(raw.goals),
+    activeDailyPlan: rolled.activeDailyPlan,
+    dailyHistory: rolled.dailyHistory,
+    gamification: normalizeGamification(raw.gamification),
     isCloudAccount: Boolean(raw.isCloudAccount),
   };
 }
@@ -140,6 +507,10 @@ export function saveProfiles(profiles: UserProfile[]): void {
       createdAt: p.createdAt,
       isCloudAccount: Boolean(p.isCloudAccount),
       studyCards: sanitizeStudyCardsForSync(p.studyCards),
+      goals: p.goals ?? [],
+      activeDailyPlan: p.activeDailyPlan,
+      dailyHistory: p.dailyHistory ?? [],
+      gamification: p.gamification ?? DEFAULT_GAMIFICATION_STATS,
     }));
     localStorage.setItem(PROFILES_KEY, JSON.stringify(serializable));
   } catch {
@@ -195,13 +566,21 @@ export interface ServerAccountResponse {
     createdAt: number;
     updatedAt: number;
     studyCards: StudySessionCard[];
+    goals?: GoalPlan[];
+    activeDailyPlan?: DailyPlanRecord;
+    dailyHistory?: DailyPlanRecord[];
+    gamification?: GamificationStats;
   };
 }
 
 export async function registerAccount(
   username: string,
   password: string,
-  studyCards: StudySessionCard[] = []
+  studyCards: StudySessionCard[] = [],
+  goals: GoalPlan[] = [],
+  gamification: GamificationStats = DEFAULT_GAMIFICATION_STATS,
+  activeDailyPlan?: DailyPlanRecord,
+  dailyHistory: DailyPlanRecord[] = []
 ): Promise<ServerAccountResponse> {
   const res = await fetch('/api/auth/register', {
     method: 'POST',
@@ -210,17 +589,29 @@ export async function registerAccount(
       username,
       password,
       studyCards: sanitizeStudyCardsForSync(studyCards),
+      goals,
+      activeDailyPlan,
+      dailyHistory,
+      gamification,
     }),
   });
   const data = (await res.json()) as ServerAccountResponse & { error?: string };
   if (!res.ok) {
     throw new Error(data.error || 'Could not create account.');
   }
+  const rolled = rolloverExpiredDailyPlan(
+    normalizeDailyPlan(data.account.activeDailyPlan),
+    normalizeDailyHistory(data.account.dailyHistory)
+  );
   return {
     token: data.token,
     account: {
       ...data.account,
       studyCards: normalizeStudyCards(data.account.studyCards),
+      goals: normalizeGoals(data.account.goals),
+      activeDailyPlan: rolled.activeDailyPlan,
+      dailyHistory: rolled.dailyHistory,
+      gamification: normalizeGamification(data.account.gamification),
     },
   };
 }
@@ -238,11 +629,19 @@ export async function loginAccount(
   if (!res.ok) {
     throw new Error(data.error || 'Sign in failed.');
   }
+  const rolled = rolloverExpiredDailyPlan(
+    normalizeDailyPlan(data.account.activeDailyPlan),
+    normalizeDailyHistory(data.account.dailyHistory)
+  );
   return {
     token: data.token,
     account: {
       ...data.account,
       studyCards: normalizeStudyCards(data.account.studyCards),
+      goals: normalizeGoals(data.account.goals),
+      activeDailyPlan: rolled.activeDailyPlan,
+      dailyHistory: rolled.dailyHistory,
+      gamification: normalizeGamification(data.account.gamification),
     },
   };
 }
@@ -254,9 +653,17 @@ export async function fetchCurrentAccount(token: string): Promise<ServerAccountR
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { account: ServerAccountResponse['account'] };
+    const rolled = rolloverExpiredDailyPlan(
+      normalizeDailyPlan(data.account.activeDailyPlan),
+      normalizeDailyHistory(data.account.dailyHistory)
+    );
     return {
       ...data.account,
       studyCards: normalizeStudyCards(data.account.studyCards),
+      goals: normalizeGoals(data.account.goals),
+      activeDailyPlan: rolled.activeDailyPlan,
+      dailyHistory: rolled.dailyHistory,
+      gamification: normalizeGamification(data.account.gamification),
     };
   } catch {
     return null;
@@ -266,7 +673,11 @@ export async function fetchCurrentAccount(token: string): Promise<ServerAccountR
 export async function syncAccountCards(
   token: string,
   cards: StudySessionCard[],
-  keepalive = false
+  keepalive = false,
+  goals?: GoalPlan[],
+  gamification?: GamificationStats,
+  activeDailyPlan?: DailyPlanRecord,
+  dailyHistory?: DailyPlanRecord[]
 ): Promise<boolean> {
   try {
     const res = await fetch('/api/account/sync', {
@@ -278,6 +689,10 @@ export async function syncAccountCards(
       keepalive,
       body: JSON.stringify({
         studyCards: sanitizeStudyCardsForSync(cards),
+        ...(goals !== undefined ? { goals } : {}),
+        ...(gamification !== undefined ? { gamification } : {}),
+        ...(activeDailyPlan !== undefined ? { activeDailyPlan } : {}),
+        ...(dailyHistory !== undefined ? { dailyHistory } : {}),
       }),
     });
     return res.ok;

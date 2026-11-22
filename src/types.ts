@@ -99,11 +99,110 @@ export interface StudySessionCard {
   sessionLogs: SessionLog[];
 }
 
+export type GoalCadence = 'daily' | 'custom' | 'week' | 'month' | 'phase';
+
+export type GoalUnit = 'days' | 'weeks' | 'months' | 'phase_days';
+
+export type GoalPhaseKind = 'menstrual' | 'follicular' | 'ovulation' | 'luteal';
+
+export type SalahName = 'Fajr' | 'Zuhr' | 'Asr' | 'Maghrib' | 'Isha';
+
+export type DeadlineMode = 'none' | 'clock' | 'hours' | 'salah';
+
+export interface PriorityDeadline {
+  mode: DeadlineMode;
+  clockTime?: string; // 24h "HH:mm"
+  durationHours?: number;
+  dueTimestamp?: number;
+  salah?: SalahName;
+}
+
+export interface GoalTaskEntry {
+  id: string;
+  kind: 'priority' | 'todo';
+  text: string;
+  status: 'empty' | 'pending' | 'done' | 'missed';
+  deadline?: PriorityDeadline;
+  completedAt?: number;
+  missedAt?: number;
+}
+
+export interface DailyPlanRecord {
+  dateKey: string; // YYYY-MM-DD
+  priorities: GoalTaskEntry[];
+  todos: GoalTaskEntry[];
+  dismissedImportBanner?: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PhaseConfig {
+  cycleDates: string[];
+  periodLengthDays: number;
+  averageCycleDays: number;
+  dataMode: '3months' | '1month';
+}
+
+export interface GoalCarryoverItem {
+  id: string;
+  originStepNumber: number;
+  kind?: 'priority' | 'todo';
+  text: string;
+  status: 'pending' | 'done' | 'pushed';
+  completedAt?: number;
+}
+
+export interface GoalStep {
+  stepNumber: number;
+  dateLabel?: string;
+  monthKey?: string; // YYYY-MM
+  phase?: GoalPhaseKind;
+  priorities?: GoalTaskEntry[];
+  todos?: GoalTaskEntry[];
+  taskText: string;
+  status: 'empty' | 'pending' | 'done' | 'missed';
+  completedAt?: number;
+  missedAt?: number;
+  carryovers: GoalCarryoverItem[];
+}
+
+export interface GoalPlan {
+  id: string;
+  title: string;
+  cadence: GoalCadence;
+  unit: GoalUnit;
+  totalSteps: number;
+  startDate?: string;
+  endDate?: string;
+  startMonth?: string; // YYYY-MM
+  endMonth?: string; // YYYY-MM
+  phaseConfig?: PhaseConfig;
+  accent: StudySessionCard['accent'];
+  steps: GoalStep[];
+  trailingCarryovers?: GoalCarryoverItem[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GamificationStats {
+  xp: number;
+  combo: number;
+  bestCombo: number;
+  shields: number;
+  rescuesCompleted: number;
+  totalStepsCompleted: number;
+  unlockedBadges: string[];
+}
+
 export interface UserProfile {
   id: string;
   name: string;
   createdAt: number;
   studyCards: StudySessionCard[];
+  goals?: GoalPlan[];
+  activeDailyPlan?: DailyPlanRecord;
+  dailyHistory?: DailyPlanRecord[];
+  gamification?: GamificationStats;
   isCloudAccount?: boolean;
   // Legacy fallback fields kept optional for smooth migration
   timerSettings?: TimerSettings;
@@ -146,4 +245,5 @@ export interface SharedVideoState {
   updatedBy: string;
 }
 
-export type AppView = 'hub' | 'workspace' | 'history';
+export type AppView = 'hub' | 'workspace' | 'goals' | 'history';
+

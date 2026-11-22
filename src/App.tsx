@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CompanionStage } from './components/CompanionStage';
 import { CoStudyRoomPanel, fallbackCopyText } from './components/CoStudyRoomPanel';
+import { DailyGoalFloatingWidget } from './components/DailyGoalFloatingWidget';
+import { GoalsView } from './components/GoalsView';
 import { HistoryDashboardView } from './components/HistoryDashboardView';
 import { ParticleBackground } from './components/ParticleBackground';
 import { ProfileOnboardingModal } from './components/ProfileOnboardingModal';
@@ -14,6 +16,9 @@ import { useStudyRoom } from './hooks/useStudyRoom';
 import type {
   AppView,
   CompanionPose,
+  DailyPlanRecord,
+  GamificationStats,
+  GoalPlan,
   PlaylistItem,
   SessionLog,
   SprintPhase,
@@ -26,8 +31,10 @@ import type {
   WorkspacePanelMode,
 } from './types';
 import {
+  createDefaultDailyPlan,
   createNewProfile,
   createStudyCard,
+  DEFAULT_GAMIFICATION_STATS,
   DEFAULT_TIMER_SETTINGS,
   fetchCurrentAccount,
   loadActiveProfileId,
@@ -37,12 +44,15 @@ import {
   loginAccount,
   normalizeStudyCards,
   registerAccount,
+  rolloverExpiredDailyPlan,
   saveActiveProfileId,
   saveAuthToken,
   saveProfiles,
   saveTimerSnapshot,
   syncAccountCards,
+  toLocalDateKey,
 } from './utils/profileStorage';
+import { applyGoalCompletionReward } from './utils/goalRewards';
 import { playCueSound } from './utils/soundCues';
 
 function makeId(prefix = 'id'): string {
@@ -126,6 +136,16 @@ export default function App() {
     profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null;
   const profileName = activeProfile?.name ?? 'Guest';
   const studyCards = activeProfile?.studyCards ?? [];
+  const goals = activeProfile?.goals ?? [];
+  const activeDailyPlan = useMemo(
+    () => activeProfile?.activeDailyPlan ?? createDefaultDailyPlan(),
+    [activeProfile?.activeDailyPlan]
+  );
+  const dailyHistory = useMemo(
+    () => activeProfile?.dailyHistory ?? [],
+    [activeProfile?.dailyHistory]
+  );
+  const gamification = activeProfile?.gamification ?? DEFAULT_GAMIFICATION_STATS;
 
   const [activeView, setActiveView] = useState<AppView>('hub');
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
@@ -291,6 +311,10 @@ export default function App() {
           name: account.username,
           createdAt: account.createdAt,
           studyCards: account.studyCards,
+          goals: account.goals ?? [],
+          activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
+          dailyHistory: account.dailyHistory ?? [],
+          gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
           isCloudAccount: true,
         };
         return [cloudProfile, ...localGuests];
@@ -308,9 +332,17 @@ export default function App() {
     void pullCloudAccount(authToken, true);
   }, [authToken, pullCloudAccount]);
 
-  const cloudSyncPayload = activeProfile?.isCloudAccount ? activeProfile.studyCards : null;
+  const cloudSyncCards = activeProfile?.isCloudAccount ? activeProfile.studyCards : null;
+  const cloudSyncGoals = activeProfile?.isCloudAccount ? activeProfile.goals ?? [] : null;
+  const cloudSyncDaily = activeProfile?.isCloudAccount ? activeProfile.activeDailyPlan : null;
+  const cloudSyncDailyHistory = activeProfile?.isCloudAccount
+    ? activeProfile.dailyHistory ?? []
+    : null;
+  const cloudSyncGamification = activeProfile?.isCloudAccount
+    ? activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS
+    : null;
   useEffect(() => {
-    if (!authToken || !cloudSyncPayload) return;
+    if (!authToken || !cloudSyncCards) return;
     if (suppressNextCloudPushRef.current) {
       suppressNextCloudPushRef.current = false;
       return;
@@ -319,7 +351,15 @@ export default function App() {
     hasUnsyncedCloudRef.current = true;
     const timer = window.setTimeout(async () => {
       setIsSyncingAccount(true);
-      const ok = await syncAccountCards(authToken, cloudSyncPayload);
+      const ok = await syncAccountCards(
+        authToken,
+        cloudSyncCards,
+        false,
+        cloudSyncGoals ?? undefined,
+        cloudSyncGamification ?? undefined,
+        cloudSyncDaily ?? undefined,
+        cloudSyncDailyHistory ?? undefined
+      );
       if (ok) {
         hasUnsyncedCloudRef.current = false;
         lastCloudUpdatedAtRef.current = Date.now();
@@ -328,12 +368,27 @@ export default function App() {
     }, 450);
 
     return () => window.clearTimeout(timer);
-  }, [authToken, cloudSyncPayload]);
+  }, [
+    authToken,
+    cloudSyncCards,
+    cloudSyncDaily,
+    cloudSyncDailyHistory,
+    cloudSyncGamification,
+    cloudSyncGoals,
+  ]);
 
   useEffect(() => {
     const handlePageHide = () => {
       if (authToken && activeProfile?.isCloudAccount && hasUnsyncedCloudRef.current) {
-        void syncAccountCards(authToken, activeProfile.studyCards, true);
+        void syncAccountCards(
+          authToken,
+          activeProfile.studyCards,
+          true,
+          activeProfile.goals ?? [],
+          activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS,
+          activeProfile.activeDailyPlan,
+          activeProfile.dailyHistory ?? []
+        );
       }
     };
     const handleFocusRefresh = () => {
@@ -348,6 +403,36 @@ export default function App() {
       window.removeEventListener('focus', handleFocusRefresh);
     };
   }, [activeProfile, authToken, pullCloudAccount]);
+
+  // Automatic Midnight / Day-Change Rollover for Daily Goals
+  useEffect(() => {
+    const checkDayRollover = () => {
+      const todayKey = toLocalDateKey(Date.now());
+      setProfiles((prev) => {
+        let changed = false;
+        const next = prev.map((p) => {
+          if (p.activeDailyPlan && p.activeDailyPlan.dateKey === todayKey) return p;
+          const rolled = rolloverExpiredDailyPlan(p.activeDailyPlan, p.dailyHistory, todayKey);
+          if (!rolled.didRollover && p.activeDailyPlan) return p;
+          changed = true;
+          return {
+            ...p,
+            activeDailyPlan: rolled.activeDailyPlan,
+            dailyHistory: rolled.dailyHistory,
+          };
+        });
+        return changed ? next : prev;
+      });
+    };
+
+    checkDayRollover();
+    const id = window.setInterval(checkDayRollover, 60_000);
+    window.addEventListener('focus', checkDayRollover);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('focus', checkDayRollover);
+    };
+  }, []);
 
   useEffect(() => {
     fetch('/api/public-config')
@@ -929,7 +1014,28 @@ export default function App() {
   const handleRegisterCloudAccount = async (username: string, password: string) => {
     const starterCards =
       activeProfile && !activeProfile.isCloudAccount ? activeProfile.studyCards : [];
-    const { token, account } = await registerAccount(username, password, starterCards);
+    const starterGoals =
+      activeProfile && !activeProfile.isCloudAccount ? activeProfile.goals ?? [] : [];
+    const starterGamification =
+      activeProfile && !activeProfile.isCloudAccount
+        ? activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS
+        : DEFAULT_GAMIFICATION_STATS;
+    const starterDailyPlan =
+      activeProfile && !activeProfile.isCloudAccount
+        ? activeProfile.activeDailyPlan
+        : createDefaultDailyPlan();
+    const starterDailyHistory =
+      activeProfile && !activeProfile.isCloudAccount ? activeProfile.dailyHistory ?? [] : [];
+
+    const { token, account } = await registerAccount(
+      username,
+      password,
+      starterCards,
+      starterGoals,
+      starterGamification,
+      starterDailyPlan,
+      starterDailyHistory
+    );
     if (token) setAuthToken(token);
     lastCloudUpdatedAtRef.current = account.updatedAt;
     suppressNextCloudPushRef.current = true;
@@ -939,6 +1045,10 @@ export default function App() {
       name: account.username,
       createdAt: account.createdAt,
       studyCards: account.studyCards,
+      goals: account.goals ?? [],
+      activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
+      dailyHistory: account.dailyHistory ?? [],
+      gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
       isCloudAccount: true,
     };
     setProfiles((prev) => [
@@ -971,6 +1081,10 @@ export default function App() {
       name: account.username,
       createdAt: account.createdAt,
       studyCards: account.studyCards,
+      goals: account.goals ?? [],
+      activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
+      dailyHistory: account.dailyHistory ?? [],
+      gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
       isCloudAccount: true,
     };
     setProfiles((prev) => [
@@ -994,7 +1108,15 @@ export default function App() {
 
   const handleSignOutCloudAccount = async () => {
     if (authToken && activeProfile?.isCloudAccount) {
-      await syncAccountCards(authToken, activeProfile.studyCards);
+      await syncAccountCards(
+        authToken,
+        activeProfile.studyCards,
+        false,
+        activeProfile.goals ?? [],
+        activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS,
+        activeProfile.activeDailyPlan,
+        activeProfile.dailyHistory ?? []
+      );
     }
     setAuthToken(null);
     hasUnsyncedCloudRef.current = false;
@@ -2174,6 +2296,113 @@ export default function App() {
     }));
   };
 
+  const handleUpdateGoals = useCallback(
+    (updater: (prev: GoalPlan[]) => GoalPlan[]) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        goals: updater(profile.goals ?? []),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
+  const handleUpdateDailyPlan = useCallback(
+    (updater: (prev: DailyPlanRecord) => DailyPlanRecord) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        activeDailyPlan: updater(profile.activeDailyPlan ?? createDefaultDailyPlan()),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
+  const handleUpdateDailyHistory = useCallback(
+    (updater: (prev: DailyPlanRecord[]) => DailyPlanRecord[]) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        dailyHistory: updater(profile.dailyHistory ?? []),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
+  const handleUpdateGamification = useCallback(
+    (updater: (prev: GamificationStats) => GamificationStats) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        gamification: updater(profile.gamification ?? DEFAULT_GAMIFICATION_STATS),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
+  const unfinishedImportCount = useMemo(() => {
+    if (activeDailyPlan.dismissedImportBanner) return 0;
+    let count = 0;
+    for (const day of dailyHistory) {
+      count += day.priorities.filter(
+        (p) => p.text.trim() && (p.status === 'pending' || p.status === 'missed')
+      ).length;
+      count += day.todos.filter(
+        (t) => t.text.trim() && (t.status === 'pending' || t.status === 'missed')
+      ).length;
+    }
+    return count;
+  }, [activeDailyPlan.dismissedImportBanner, dailyHistory]);
+
+  const handleWidgetTickDailyEntry = useCallback(
+    (kind: 'priority' | 'todo', entryId: string) => {
+      const list = kind === 'priority' ? activeDailyPlan.priorities : activeDailyPlan.todos;
+      const target = list.find((e) => e.id === entryId);
+      if (!target || !target.text.trim()) return;
+      const wasDone = target.status === 'done';
+
+      handleUpdateDailyPlan((prev) => {
+        const listKey = kind === 'priority' ? 'priorities' : 'todos';
+        return {
+          ...prev,
+          updatedAt: Date.now(),
+          [listKey]: prev[listKey].map((item) =>
+            item.id === entryId
+              ? {
+                  ...item,
+                  status: wasDone ? 'pending' : 'done',
+                  completedAt: wasDone ? undefined : Date.now(),
+                  missedAt: undefined,
+                }
+              : item
+          ),
+        };
+      });
+
+      if (!wasDone) {
+        handleUpdateGamification((prev) => {
+          const res = applyGoalCompletionReward(prev, kind === 'priority' ? 55 : 35, false);
+          playCueSound(res.leveledUpTo ? 'goal_levelup' : 'goal_tick');
+          return res.nextStats;
+        });
+      }
+    },
+    [activeDailyPlan.priorities, activeDailyPlan.todos, handleUpdateDailyPlan, handleUpdateGamification]
+  );
+
+  const handleWidgetMissDailyEntry = useCallback(
+    (kind: 'priority' | 'todo', entryId: string) => {
+      handleUpdateDailyPlan((prev) => {
+        const listKey = kind === 'priority' ? 'priorities' : 'todos';
+        return {
+          ...prev,
+          updatedAt: Date.now(),
+          [listKey]: prev[listKey].map((item) =>
+            item.id === entryId ? { ...item, status: 'missed', missedAt: Date.now() } : item
+          ),
+        };
+      });
+      playCueSound('goal_carryover');
+    },
+    [handleUpdateDailyPlan]
+  );
+
   const activeSprintPhase: SprintPhase = isBreakRunning ? 'break' : 'work';
 
   return (
@@ -2217,9 +2446,9 @@ export default function App() {
           onJoinFriendRoom={handleJoinRoomInput}
         />
       ) : activeView === 'workspace' && activeCard ? (
-        <main className="relative z-10 mx-auto grid w-full max-w-[1440px] flex-1 min-h-0 grid-cols-1 gap-3.5 px-4 py-3 sm:px-6 md:grid-cols-12 lg:px-8">
+        <main className="relative z-10 mx-auto grid w-full max-w-[1440px] flex-1 min-h-0 grid-cols-1 gap-3.5 px-4 py-3 sm:px-6 lg:grid-cols-12 lg:px-8">
           {/* Left Column: Realistic Sora Voice + Generous Full-Face Camera / Friend Co-Study */}
-          <div className="flex min-h-0 flex-col gap-3 md:col-span-5 lg:col-span-4">
+          <div className="flex min-h-0 flex-col gap-3 lg:col-span-5 xl:col-span-4">
             <CompanionStage
               pose={pose}
               caption={companionCaption}
@@ -2255,7 +2484,7 @@ export default function App() {
           </div>
 
           {/* Right Column: Mode Switch + 3 Separate Timers (Focus | Break | Check-in) + Workspace */}
-          <div className="flex min-h-0 flex-col gap-3 md:col-span-7 lg:col-span-8">
+          <div className="flex min-h-0 flex-col gap-3 lg:col-span-7 xl:col-span-8">
             <SessionTimerBar
               panelMode={panelMode}
               onChangePanelMode={setPanelMode}
@@ -2344,6 +2573,18 @@ export default function App() {
             )}
           </div>
         </main>
+      ) : activeView === 'goals' ? (
+        <GoalsView
+          profileName={profileName}
+          goals={goals}
+          activeDailyPlan={activeDailyPlan}
+          dailyHistory={dailyHistory}
+          gamification={gamification}
+          onUpdateGoals={handleUpdateGoals}
+          onUpdateDailyPlan={handleUpdateDailyPlan}
+          onUpdateDailyHistory={handleUpdateDailyHistory}
+          onUpdateGamification={handleUpdateGamification}
+        />
       ) : (
         <HistoryDashboardView
           profileName={profileName}
@@ -2352,6 +2593,16 @@ export default function App() {
           onDeleteLog={handleDeleteLog}
           onBackToHub={() => setActiveView('hub')}
           onBackToWorkspace={() => setActiveView(activeCard ? 'workspace' : 'hub')}
+        />
+      )}
+
+      {(activeView === 'hub' || activeView === 'history') && (
+        <DailyGoalFloatingWidget
+          activeDailyPlan={activeDailyPlan}
+          unfinishedImportCount={unfinishedImportCount}
+          onTickEntry={handleWidgetTickDailyEntry}
+          onMissEntry={handleWidgetMissDailyEntry}
+          onOpenGoalsTab={() => setActiveView('goals')}
         />
       )}
 
