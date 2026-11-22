@@ -213,6 +213,37 @@ export interface ChecklistRow {
   label: string;
 }
 
+export type CycleFlowLevel = 'none' | 'spotting' | 'light' | 'medium' | 'heavy' | 'ended';
+
+export interface CycleDayLog {
+  dateKey: string; // YYYY-MM-DD
+  flow: CycleFlowLevel;
+  symptoms?: string[];
+  note: string;
+  updatedAt: number;
+}
+
+export interface DayLogStroke {
+  id: string;
+  tool: 'pen' | 'eraser';
+  color: string;
+  width: number;
+  points: Array<{ x: number; y: number }>; // virtual 1000x1920 coordinates
+}
+
+export interface DayLogEntry {
+  id: string;
+  dateKey: string;
+  title?: string;
+  strokes: DayLogStroke[];
+  hourNotes?: Record<string, string>; // '4'..'27' (4 AM to 3 AM)
+  cycleSummary?: string;
+  previewDataUrl?: string;
+  createdAt: number;
+  updatedAt: number;
+  archivedAt?: number;
+}
+
 export interface ChecklistTableRecord {
   id: string;
   title: string;
@@ -235,6 +266,9 @@ export interface UserProfile {
   studyCards: StudySessionCard[];
   goals?: GoalPlan[];
   checklistTables?: ChecklistTableRecord[];
+  activeDayLog?: DayLogEntry;
+  dayLogHistory?: DayLogEntry[];
+  cycleLogs?: Record<string, CycleDayLog>;
   activeDailyPlan?: DailyPlanRecord;
   dailyHistory?: DailyPlanRecord[];
   gamification?: GamificationStats;
@@ -280,5 +314,5 @@ export interface SharedVideoState {
   updatedBy: string;
 }
 
-export type AppView = 'hub' | 'workspace' | 'goals' | 'checklists' | 'history';
+export type AppView = 'hub' | 'workspace' | 'goals' | 'checklists' | 'daylog' | 'history';
 

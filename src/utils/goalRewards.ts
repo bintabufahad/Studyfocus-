@@ -96,7 +96,7 @@ export function computeCyclePhaseForDay(
   averageCycleDays: number,
   periodLengthDays: number
 ): GoalPhaseKind {
-  const safePeriod = Math.max(2, Math.min(10, periodLengthDays));
+  const safePeriod = Math.max(1, Math.min(14, periodLengthDays));
   const safeTotal = Math.max(18, Math.min(45, averageCycleDays));
   const ovulationStart = Math.max(safePeriod + 2, safeTotal - 15);
   const lutealStart = Math.max(ovulationStart + 3, safeTotal - 11);
@@ -105,6 +105,70 @@ export function computeCyclePhaseForDay(
   if (cycleDay < ovulationStart) return 'follicular';
   if (cycleDay < lutealStart) return 'ovulation';
   return 'luteal';
+}
+
+export function computePhaseDayBreakdown(
+  averageCycleDays: number,
+  periodLengthDays: number
+): {
+  menstrual: { start: number; end: number };
+  follicular: { start: number; end: number };
+  ovulation: { start: number; end: number };
+  luteal: { start: number; end: number };
+} {
+  const safePeriod = Math.max(1, Math.min(14, periodLengthDays));
+  const safeTotal = Math.max(18, Math.min(45, averageCycleDays));
+  const ovulationStart = Math.max(safePeriod + 2, safeTotal - 15);
+  const lutealStart = Math.max(ovulationStart + 3, safeTotal - 11);
+
+  return {
+    menstrual: { start: 1, end: safePeriod },
+    follicular: { start: safePeriod + 1, end: ovulationStart - 1 },
+    ovulation: { start: ovulationStart, end: lutealStart - 1 },
+    luteal: { start: lutealStart, end: safeTotal },
+  };
+}
+
+function diffDaysIso(fromIso: string, toIso: string): number {
+  const a = new Date(`${fromIso}T00:00:00`);
+  const b = new Date(`${toIso}T00:00:00`);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
+}
+
+export function resolveActiveCycleContext(
+  goals: GoalPlan[],
+  todayIso: string
+): {
+  phaseGoal: GoalPlan | null;
+  cycleDay: number;
+  totalCycleDays: number;
+  periodLengthDays: number;
+  phase: GoalPhaseKind;
+  cycleStartIso: string;
+} | null {
+  const phaseGoals = goals.filter((g) => g.cadence === 'phase' && g.phaseConfig);
+  if (phaseGoals.length === 0) return null;
+  const phaseGoal = [...phaseGoals].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const cfg = phaseGoal.phaseConfig!;
+  const sortedDates = [...cfg.cycleDates].sort((a, b) => a.localeCompare(b));
+  const latestStart = sortedDates[sortedDates.length - 1] ?? phaseGoal.startDate ?? todayIso;
+  const total = Math.max(1, phaseGoal.steps.length);
+  const elapsed = Math.max(0, diffDaysIso(latestStart, todayIso));
+  const cycleDay = Math.min(total, (elapsed % Math.max(1, cfg.averageCycleDays)) + 1);
+  const matchingStep = phaseGoal.steps.find((s) => s.stepNumber === cycleDay);
+  const phase =
+    matchingStep?.phase ??
+    computeCyclePhaseForDay(cycleDay, cfg.averageCycleDays, cfg.periodLengthDays);
+
+  return {
+    phaseGoal,
+    cycleDay,
+    totalCycleDays: total,
+    periodLengthDays: cfg.periodLengthDays,
+    phase,
+    cycleStartIso: latestStart,
+  };
 }
 
 export function applyGoalCompletionReward(

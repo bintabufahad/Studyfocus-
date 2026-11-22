@@ -3,7 +3,11 @@ import type {
   ChecklistColumn,
   ChecklistRow,
   ChecklistTableRecord,
+  CycleDayLog,
+  CycleFlowLevel,
   DailyPlanRecord,
+  DayLogEntry,
+  DayLogStroke,
   GamificationStats,
   GoalCadence,
   GoalPhaseKind,
@@ -76,6 +80,9 @@ export function createNewProfile(name: string, id?: string, isCloudAccount = fal
     studyCards: [],
     goals: [],
     checklistTables: [],
+    activeDayLog: createDefaultDayLog(),
+    dayLogHistory: [],
+    cycleLogs: {},
     gamification: { ...DEFAULT_GAMIFICATION_STATS },
     isCloudAccount,
   };
@@ -487,6 +494,96 @@ export function normalizeChecklistTables(rawTables: unknown): ChecklistTableReco
     });
 }
 
+export function createDefaultDayLog(dateKey = toLocalDateKey(Date.now())): DayLogEntry {
+  const now = Date.now();
+  return {
+    id: makeEntryId('dlog'),
+    dateKey,
+    strokes: [],
+    hourNotes: {},
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function normalizeStrokes(raw: unknown): DayLogStroke[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((s): s is DayLogStroke => Boolean(s && typeof s === 'object'))
+    .map((s): DayLogStroke => ({
+      id: typeof s.id === 'string' && s.id ? s.id : makeEntryId('st'),
+      tool: s.tool === 'eraser' ? 'eraser' : 'pen',
+      color: typeof s.color === 'string' ? s.color : '#e2f1ff',
+      width: typeof s.width === 'number' && s.width > 0 ? s.width : 3,
+      points: Array.isArray(s.points)
+        ? s.points.filter(
+            (p): p is { x: number; y: number } =>
+              Boolean(p && typeof p.x === 'number' && typeof p.y === 'number')
+          )
+        : [],
+    }))
+    .filter((s) => s.points.length > 0);
+}
+
+export function normalizeDayLogEntry(raw: unknown): DayLogEntry {
+  if (!raw || typeof raw !== 'object') {
+    return createDefaultDayLog();
+  }
+  const r = raw as Partial<DayLogEntry>;
+  const hourNotes: Record<string, string> = {};
+  if (r.hourNotes && typeof r.hourNotes === 'object') {
+    for (const [k, v] of Object.entries(r.hourNotes)) {
+      if (typeof v === 'string' && v.length > 0) hourNotes[k] = v;
+    }
+  }
+  return {
+    id: typeof r.id === 'string' && r.id ? r.id : makeEntryId('dlog'),
+    dateKey: typeof r.dateKey === 'string' && r.dateKey ? r.dateKey : toLocalDateKey(Date.now()),
+    ...(typeof r.title === 'string' ? { title: r.title } : {}),
+    strokes: normalizeStrokes(r.strokes),
+    hourNotes,
+    ...(typeof r.cycleSummary === 'string' ? { cycleSummary: r.cycleSummary } : {}),
+    createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
+    updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : Date.now(),
+    ...(typeof r.archivedAt === 'number' ? { archivedAt: r.archivedAt } : {}),
+  };
+}
+
+export function normalizeDayLogHistory(raw: unknown): DayLogEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item): item is DayLogEntry => Boolean(item && typeof item === 'object'))
+    .map(normalizeDayLogEntry)
+    .slice(0, 90);
+}
+
+export function normalizeCycleLogs(raw: unknown): Record<string, CycleDayLog> {
+  if (!raw || typeof raw !== 'object') return {};
+  const result: Record<string, CycleDayLog> = {};
+  const validFlows = new Set<CycleFlowLevel>([
+    'none',
+    'spotting',
+    'light',
+    'medium',
+    'heavy',
+    'ended',
+  ]);
+  for (const [dateKey, val] of Object.entries(raw)) {
+    if (!val || typeof val !== 'object') continue;
+    const v = val as Partial<CycleDayLog>;
+    result[dateKey] = {
+      dateKey: typeof v.dateKey === 'string' ? v.dateKey : dateKey,
+      flow: v.flow && validFlows.has(v.flow) ? v.flow : 'none',
+      symptoms: Array.isArray(v.symptoms)
+        ? v.symptoms.filter((s): s is string => typeof s === 'string')
+        : [],
+      note: typeof v.note === 'string' ? v.note : '',
+      updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : Date.now(),
+    };
+  }
+  return result;
+}
+
 export function normalizeStudyCards(rawCards: unknown[]): StudySessionCard[] {
   if (!Array.isArray(rawCards)) return [];
   return rawCards
@@ -557,6 +654,9 @@ function migrateProfile(raw: UserProfile): UserProfile {
     studyCards: cards,
     goals: normalizeGoals(raw.goals),
     checklistTables: normalizeChecklistTables(raw.checklistTables),
+    activeDayLog: normalizeDayLogEntry(raw.activeDayLog),
+    dayLogHistory: normalizeDayLogHistory(raw.dayLogHistory),
+    cycleLogs: normalizeCycleLogs(raw.cycleLogs),
     activeDailyPlan: rolled.activeDailyPlan,
     dailyHistory: rolled.dailyHistory,
     gamification: normalizeGamification(raw.gamification),
@@ -586,6 +686,12 @@ export function saveProfiles(profiles: UserProfile[]): void {
       studyCards: sanitizeStudyCardsForSync(p.studyCards),
       goals: p.goals ?? [],
       checklistTables: p.checklistTables ?? [],
+      activeDayLog: p.activeDayLog ? { ...p.activeDayLog, previewDataUrl: undefined } : undefined,
+      dayLogHistory: (p.dayLogHistory ?? []).map((d) => ({
+        ...d,
+        previewDataUrl: undefined,
+      })),
+      cycleLogs: p.cycleLogs ?? {},
       activeDailyPlan: p.activeDailyPlan,
       dailyHistory: p.dailyHistory ?? [],
       gamification: p.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -646,10 +752,19 @@ export interface ServerAccountResponse {
     studyCards: StudySessionCard[];
     goals?: GoalPlan[];
     checklistTables?: ChecklistTableRecord[];
+    activeDayLog?: DayLogEntry;
+    dayLogHistory?: DayLogEntry[];
+    cycleLogs?: Record<string, CycleDayLog>;
     activeDailyPlan?: DailyPlanRecord;
     dailyHistory?: DailyPlanRecord[];
     gamification?: GamificationStats;
   };
+}
+
+export interface DaySyncExtras {
+  activeDayLog?: DayLogEntry;
+  dayLogHistory?: DayLogEntry[];
+  cycleLogs?: Record<string, CycleDayLog>;
 }
 
 export async function registerAccount(
@@ -660,7 +775,8 @@ export async function registerAccount(
   gamification: GamificationStats = DEFAULT_GAMIFICATION_STATS,
   activeDailyPlan?: DailyPlanRecord,
   dailyHistory: DailyPlanRecord[] = [],
-  checklistTables: ChecklistTableRecord[] = []
+  checklistTables: ChecklistTableRecord[] = [],
+  daySync?: DaySyncExtras
 ): Promise<ServerAccountResponse> {
   const res = await fetch('/api/auth/register', {
     method: 'POST',
@@ -671,6 +787,18 @@ export async function registerAccount(
       studyCards: sanitizeStudyCardsForSync(studyCards),
       goals,
       checklistTables,
+      ...(daySync?.activeDayLog
+        ? { activeDayLog: { ...daySync.activeDayLog, previewDataUrl: undefined } }
+        : {}),
+      ...(daySync?.dayLogHistory
+        ? {
+            dayLogHistory: daySync.dayLogHistory.map((d) => ({
+              ...d,
+              previewDataUrl: undefined,
+            })),
+          }
+        : {}),
+      ...(daySync?.cycleLogs ? { cycleLogs: daySync.cycleLogs } : {}),
       activeDailyPlan,
       dailyHistory,
       gamification,
@@ -691,6 +819,9 @@ export async function registerAccount(
       studyCards: normalizeStudyCards(data.account.studyCards),
       goals: normalizeGoals(data.account.goals),
       checklistTables: normalizeChecklistTables(data.account.checklistTables),
+      activeDayLog: normalizeDayLogEntry(data.account.activeDayLog),
+      dayLogHistory: normalizeDayLogHistory(data.account.dayLogHistory),
+      cycleLogs: normalizeCycleLogs(data.account.cycleLogs),
       activeDailyPlan: rolled.activeDailyPlan,
       dailyHistory: rolled.dailyHistory,
       gamification: normalizeGamification(data.account.gamification),
@@ -722,6 +853,9 @@ export async function loginAccount(
       studyCards: normalizeStudyCards(data.account.studyCards),
       goals: normalizeGoals(data.account.goals),
       checklistTables: normalizeChecklistTables(data.account.checklistTables),
+      activeDayLog: normalizeDayLogEntry(data.account.activeDayLog),
+      dayLogHistory: normalizeDayLogHistory(data.account.dayLogHistory),
+      cycleLogs: normalizeCycleLogs(data.account.cycleLogs),
       activeDailyPlan: rolled.activeDailyPlan,
       dailyHistory: rolled.dailyHistory,
       gamification: normalizeGamification(data.account.gamification),
@@ -745,6 +879,9 @@ export async function fetchCurrentAccount(token: string): Promise<ServerAccountR
       studyCards: normalizeStudyCards(data.account.studyCards),
       goals: normalizeGoals(data.account.goals),
       checklistTables: normalizeChecklistTables(data.account.checklistTables),
+      activeDayLog: normalizeDayLogEntry(data.account.activeDayLog),
+      dayLogHistory: normalizeDayLogHistory(data.account.dayLogHistory),
+      cycleLogs: normalizeCycleLogs(data.account.cycleLogs),
       activeDailyPlan: rolled.activeDailyPlan,
       dailyHistory: rolled.dailyHistory,
       gamification: normalizeGamification(data.account.gamification),
@@ -762,7 +899,8 @@ export async function syncAccountCards(
   gamification?: GamificationStats,
   activeDailyPlan?: DailyPlanRecord,
   dailyHistory?: DailyPlanRecord[],
-  checklistTables?: ChecklistTableRecord[]
+  checklistTables?: ChecklistTableRecord[],
+  daySync?: DaySyncExtras
 ): Promise<boolean> {
   try {
     const res = await fetch('/api/account/sync', {
@@ -776,6 +914,18 @@ export async function syncAccountCards(
         studyCards: sanitizeStudyCardsForSync(cards),
         ...(goals !== undefined ? { goals } : {}),
         ...(checklistTables !== undefined ? { checklistTables } : {}),
+        ...(daySync?.activeDayLog !== undefined
+          ? { activeDayLog: { ...daySync.activeDayLog, previewDataUrl: undefined } }
+          : {}),
+        ...(daySync?.dayLogHistory !== undefined
+          ? {
+              dayLogHistory: daySync.dayLogHistory.map((d) => ({
+                ...d,
+                previewDataUrl: undefined,
+              })),
+            }
+          : {}),
+        ...(daySync?.cycleLogs !== undefined ? { cycleLogs: daySync.cycleLogs } : {}),
         ...(gamification !== undefined ? { gamification } : {}),
         ...(activeDailyPlan !== undefined ? { activeDailyPlan } : {}),
         ...(dailyHistory !== undefined ? { dailyHistory } : {}),

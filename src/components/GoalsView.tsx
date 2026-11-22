@@ -16,6 +16,7 @@ import {
   HeartPulse,
   History,
   Layers,
+  PenTool,
   Plus,
   RotateCcw,
   Save,
@@ -23,6 +24,7 @@ import {
   Shield,
   Sparkles,
   Sun,
+  Table2,
   Target,
   Trash2,
   Trophy,
@@ -30,6 +32,8 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  CycleDayLog,
+  CycleFlowLevel,
   DailyPlanRecord,
   GamificationStats,
   GoalCadence,
@@ -49,10 +53,13 @@ import {
   BADGE_DEFS,
   computeCyclePhaseForDay,
   computeLevelInfo,
+  computePhaseDayBreakdown,
   PHASE_META,
+  resolveActiveCycleContext,
 } from '../utils/goalRewards';
 import { playCueSound } from '../utils/soundCues';
 import { toLocalDateKey } from '../utils/profileStorage';
+import { FLOW_LEVEL_OPTIONS } from './DayLogView';
 import {
   computeDueTimestampForDeadline,
   formatPriorityDeadline,
@@ -66,10 +73,13 @@ interface GoalsViewProps {
   activeDailyPlan: DailyPlanRecord;
   dailyHistory: DailyPlanRecord[];
   gamification: GamificationStats;
+  cycleLogs: Record<string, CycleDayLog>;
   onUpdateGoals: (updater: (prev: GoalPlan[]) => GoalPlan[]) => void;
   onUpdateDailyPlan: (updater: (prev: DailyPlanRecord) => DailyPlanRecord) => void;
   onUpdateDailyHistory: (updater: (prev: DailyPlanRecord[]) => DailyPlanRecord[]) => void;
   onUpdateGamification: (updater: (prev: GamificationStats) => GamificationStats) => void;
+  onUpdateCycleLog: (dateKey: string, updater: (prev: CycleDayLog) => CycleDayLog) => void;
+  onOpenDayLogTab?: () => void;
 }
 
 interface FloatingEvent {
@@ -310,11 +320,19 @@ function buildGoalSteps(
   cadence: Exclude<GoalCadence, 'daily'>,
   startDate: string,
   phaseConfig?: PhaseConfig,
-  monthRange?: { startMonth: string; endMonth: string; useExactDays: boolean }
+  monthRange?: { startMonth: string; endMonth: string; useExactDays: boolean },
+  assignWeekDates = false
 ): GoalStep[] {
   if (cadence === 'month' && monthRange && !monthRange.useExactDays) {
     return buildMonthSteps(monthRange.startMonth, monthRange.endMonth);
   }
+
+  const phaseAnchorStart =
+    cadence === 'phase' && phaseConfig?.cycleDates?.length
+      ? [...phaseConfig.cycleDates].sort((a, b) => a.localeCompare(b))[
+          phaseConfig.cycleDates.length - 1
+        ]
+      : startDate;
 
   const safeCount = Math.max(1, Math.min(366, Math.round(count)));
   return Array.from({ length: safeCount }, (_, idx) => {
@@ -328,9 +346,13 @@ function buildGoalSteps(
       );
     }
     const dateLabel =
-      cadence === 'custom' || (cadence === 'month' && monthRange?.useExactDays)
-        ? addDaysToIso(startDate, idx)
-        : undefined;
+      cadence === 'phase'
+        ? addDaysToIso(phaseAnchorStart, idx)
+        : cadence === 'custom' ||
+            (cadence === 'month' && monthRange?.useExactDays) ||
+            (cadence === 'week' && assignWeekDates)
+          ? addDaysToIso(startDate, idx)
+          : undefined;
     const monthKey = dateLabel ? dateLabel.slice(0, 7) : undefined;
     return createFreshStep(stepNum, { dateLabel, monthKey, phase });
   });
@@ -851,10 +873,13 @@ export function GoalsView({
   activeDailyPlan,
   dailyHistory,
   gamification,
+  cycleLogs,
   onUpdateGoals,
   onUpdateDailyPlan,
   onUpdateDailyHistory,
   onUpdateGamification,
+  onUpdateCycleLog,
+  onOpenDayLogTab,
 }: GoalsViewProps) {
   const todayIso = toLocalDateKey(Date.now());
   const currentMonthKey = todayIso.slice(0, 7);
@@ -909,16 +934,17 @@ export function GoalsView({
   const [phaseDate2, setPhaseDate2] = useState<string>(() => addDaysToIso(todayIso, -35));
   const [phaseDate3, setPhaseDate3] = useState<string>(() => addDaysToIso(todayIso, -6));
   const [phaseManualCycleDaysInput, setPhaseManualCycleDaysInput] = useState<string>('28');
-  const [phasePeriodDaysInput, setPhasePeriodDaysInput] = useState<string>('5');
+  const [phasePeriodDaysInput, setPhasePeriodDaysInput] = useState<string>('6');
   const phaseManualCycleDays = useMemo(() => {
     const parsed = Number.parseInt(phaseManualCycleDaysInput, 10);
     return Number.isFinite(parsed) ? Math.max(18, Math.min(45, parsed)) : 28;
   }, [phaseManualCycleDaysInput]);
   const phasePeriodDays = useMemo(() => {
     const parsed = Number.parseInt(phasePeriodDaysInput, 10);
-    return Number.isFinite(parsed) ? Math.max(1, Math.min(14, parsed)) : 5;
+    return Number.isFinite(parsed) ? Math.max(1, Math.min(14, parsed)) : 6;
   }, [phasePeriodDaysInput]);
   const [phaseFilter, setPhaseFilter] = useState<'all' | GoalPhaseKind>('all');
+  const [showCycleTable, setShowCycleTable] = useState<boolean>(true);
 
   // Week / Month tab filters, Scope Master Plan, Drag-and-Drop & Expanded Bars
   const [selectedWeekTab, setSelectedWeekTab] = useState<'all' | number>('all');
@@ -1353,7 +1379,7 @@ export function GoalsView({
       creatorCadence === 'phase'
         ? {
             cycleDates: computedPhasePreview.sortedDates,
-            periodLengthDays: Math.max(1, Math.min(14, phasePeriodDays || 5)),
+            periodLengthDays: Math.max(1, Math.min(14, phasePeriodDays || 6)),
             averageCycleDays: computedPhasePreview.avgDays,
             dataMode: phaseDataMode,
           }
@@ -1370,7 +1396,8 @@ export function GoalsView({
             endMonth: monthEnd < monthStart ? monthStart : monthEnd,
             useExactDays: monthUseExactDays,
           }
-        : undefined
+        : undefined,
+      creatorCadence === 'week' && weekTrackBy === 'days'
     );
 
     const now = Date.now();
@@ -1812,25 +1839,35 @@ export function GoalsView({
         inserted,
         ...g.steps.slice(insertIdx),
       ];
-      const renumberedSteps = rawSteps.map((s, idx) => ({
-        ...s,
-        stepNumber: idx + 1,
-        carryovers: s.carryovers.map((co) => ({
-          ...co,
-          originStepNumber:
-            co.originStepNumber >= insertStepNum
-              ? co.originStepNumber + 1
-              : co.originStepNumber,
-        })),
-      }));
+      const baseAnchor =
+        g.steps[0]?.dateLabel ??
+        g.phaseConfig?.cycleDates?.[g.phaseConfig.cycleDates.length - 1] ??
+        g.startDate;
+      const renumberedSteps = rawSteps.map((s, idx) => {
+        const nextDate = baseAnchor ? addDaysToIso(baseAnchor, idx) : s.dateLabel;
+        return {
+          ...s,
+          stepNumber: idx + 1,
+          dateLabel: nextDate,
+          monthKey: nextDate ? nextDate.slice(0, 7) : s.monthKey,
+          carryovers: s.carryovers.map((co) => ({
+            ...co,
+            originStepNumber:
+              co.originStepNumber >= insertStepNum
+                ? co.originStepNumber + 1
+                : co.originStepNumber,
+          })),
+        };
+      });
       const nextPeriodDays =
         phase === 'menstrual'
           ? renumberedSteps.filter((s) => s.phase === 'menstrual').length
-          : g.phaseConfig?.periodLengthDays ?? 5;
+          : g.phaseConfig?.periodLengthDays ?? 6;
 
       return {
         ...g,
         totalSteps: renumberedSteps.length,
+        endDate: renumberedSteps[renumberedSteps.length - 1]?.dateLabel ?? g.endDate,
         ...(g.phaseConfig
           ? {
               phaseConfig: {
@@ -1850,6 +1887,98 @@ export function GoalsView({
     }));
     playCueSound('goal_tick');
     showNotice(`Added +1 day to ${PHASE_META[phase].label} Phase (Day #${insertStepNum}).`);
+  };
+
+  const handleUpdateStepPhase = (
+    goal: GoalPlan,
+    stepNumber: number,
+    nextPhase: GoalPhaseKind
+  ) => {
+    updateGoalById(goal.id, (g) => {
+      const nextSteps = g.steps.map((s) =>
+        s.stepNumber === stepNumber ? { ...s, phase: nextPhase } : s
+      );
+      const nextPeriodDays = nextSteps.filter((s) => s.phase === 'menstrual').length;
+      return {
+        ...g,
+        ...(g.phaseConfig
+          ? {
+              phaseConfig: {
+                ...g.phaseConfig,
+                periodLengthDays: Math.max(1, nextPeriodDays),
+              },
+            }
+          : {}),
+        steps: nextSteps,
+      };
+    });
+  };
+
+  const handleStartNewCycleToday = (goal: GoalPlan) => {
+    if (goal.cadence !== 'phase') return;
+    const periodLen = goal.phaseConfig?.periodLengthDays ?? 6;
+    updateGoalById(goal.id, (g) => {
+      const existingDates = g.phaseConfig?.cycleDates ?? [];
+      const nextDates = Array.from(new Set([...existingDates, todayIso])).sort((a, b) =>
+        a.localeCompare(b)
+      );
+      const total = g.steps.length;
+      const nextSteps = g.steps.map((s, idx) => {
+        const dateLabel = addDaysToIso(todayIso, idx);
+        return {
+          ...s,
+          dateLabel,
+          monthKey: dateLabel.slice(0, 7),
+          phase: computeCyclePhaseForDay(idx + 1, total, periodLen),
+        };
+      });
+      return {
+        ...g,
+        startDate: todayIso,
+        endDate: nextSteps[nextSteps.length - 1]?.dateLabel ?? g.endDate,
+        phaseConfig: {
+          cycleDates: nextDates,
+          periodLengthDays: periodLen,
+          averageCycleDays: total,
+          dataMode: g.phaseConfig?.dataMode ?? '1month',
+        },
+        steps: nextSteps,
+      };
+    });
+    playCueSound('goal_tick');
+    showNotice(`Started fresh Cycle Day 1 from ${todayIso} (${periodLen} menstrual days).`);
+  };
+
+  const handleQuickCreatePeriodGoal = () => {
+    const now = Date.now();
+    const phaseConfig: PhaseConfig = {
+      cycleDates: [todayIso],
+      periodLengthDays: 6,
+      averageCycleDays: 28,
+      dataMode: '1month',
+    };
+    const steps = buildGoalSteps(28, 'phase', todayIso, phaseConfig);
+    const created: GoalPlan = {
+      id: makeId('goal'),
+      title: 'My Cycle Tracker',
+      cadence: 'phase',
+      unit: 'phase_days',
+      totalSteps: steps.length,
+      startDate: todayIso,
+      endDate: steps[steps.length - 1]?.dateLabel,
+      phaseConfig,
+      accent: 'rose',
+      steps,
+      trailingCarryovers: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    onUpdateGoals((prev) => [created, ...prev]);
+    setActiveSelection(created.id);
+    setPhaseFilter('all');
+    setShowCycleTable(true);
+    playCueSound('goal_tick');
+    showNotice('Created 28-day Monthly Phases tracker (Days 1–6 Menstrual).');
   };
 
   const handleSmartSplit = (e: React.FormEvent) => {
@@ -3070,6 +3199,106 @@ export function GoalsView({
             </div>
           )}
 
+          {/* Synced Cycle & Daily Check-In Strip (links Daily Plan <-> Monthly Phases <-> Day Log) */}
+          {(() => {
+            const cycleCtx = resolveActiveCycleContext(goals, activeDailyPlan.dateKey);
+            const todayLog: CycleDayLog = cycleLogs[activeDailyPlan.dateKey] ?? {
+              dateKey: activeDailyPlan.dateKey,
+              flow: 'none',
+              symptoms: [],
+              note: '',
+              updatedAt: Date.now(),
+            };
+            return (
+              <div className="rounded-xl border border-rose-300/25 bg-rose-500/[0.06] p-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <HeartPulse className="h-4 w-4 text-rose-300" />
+                    <span className="text-xs font-semibold text-rose-100">
+                      Period &amp; Cycle Sync ({activeDailyPlan.dateKey})
+                    </span>
+                    {cycleCtx ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (cycleCtx.phaseGoal) {
+                            setActiveSelection(cycleCtx.phaseGoal.id);
+                          }
+                        }}
+                        className={`cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-semibold ${
+                          PHASE_META[cycleCtx.phase].chipClass
+                        }`}
+                      >
+                        Cycle Day {cycleCtx.cycleDay}/{cycleCtx.totalCycleDays} ·{' '}
+                        {PHASE_META[cycleCtx.phase].label}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleQuickCreatePeriodGoal}
+                        className="flex cursor-pointer items-center gap-1 rounded-md border border-rose-300/40 bg-rose-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-rose-100 hover:bg-rose-400/25"
+                      >
+                        <Sparkles className="h-3 w-3" />
+                        Start 28-Day Period Tracker (6d Menstrual)
+                      </button>
+                    )}
+                  </div>
+
+                  {onOpenDayLogTab && (
+                    <button
+                      type="button"
+                      onClick={onOpenDayLogTab}
+                      className="flex cursor-pointer items-center gap-1 rounded-md border border-cyan-300/30 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100 hover:bg-cyan-400/20"
+                    >
+                      <PenTool className="h-3 w-3" />
+                      Open 4 AM–3 AM Sheet
+                    </button>
+                  )}
+                </div>
+
+                <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-slate-300">Today&apos;s Flow:</span>
+                  {FLOW_LEVEL_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() =>
+                        onUpdateCycleLog(activeDailyPlan.dateKey, (prev) => ({
+                          ...prev,
+                          dateKey: activeDailyPlan.dateKey,
+                          flow: opt.value,
+                          updatedAt: Date.now(),
+                        }))
+                      }
+                      className={`cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium ${
+                        todayLog.flow === opt.value
+                          ? `${opt.chipClass} ring-1 ring-rose-300/70`
+                          : 'border-cyan-200/12 bg-slate-950/50 text-slate-400 hover:text-slate-100'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+
+                  <input
+                    type="text"
+                    value={todayLog.note}
+                    onChange={(e) =>
+                      onUpdateCycleLog(activeDailyPlan.dateKey, (prev) => ({
+                        ...prev,
+                        dateKey: activeDailyPlan.dateKey,
+                        note: e.target.value,
+                        updatedAt: Date.now(),
+                      }))
+                    }
+                    placeholder="Synced cycle / wellness note..."
+                    className="bio-input min-w-[210px] flex-1 rounded-lg px-2.5 py-1 text-xs text-slate-100"
+                  />
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Priorities (3 default + infinite) + To-Do List (5 default + infinite) */}
           <TaskEntriesEditor
             scopeKey={`daily:${activeDailyPlan.dateKey}`}
@@ -3942,6 +4171,209 @@ export function GoalsView({
             )}
           </div>
 
+          {/* Structured Cycle Phase Breakdown & Synced Flow Table (Monthly Phases Only) */}
+          {activeGoal.cadence === 'phase' && (() => {
+            const periodDays = activeGoal.phaseConfig?.periodLengthDays ?? 6;
+            const breakdown = computePhaseDayBreakdown(activeGoal.steps.length, periodDays);
+            return (
+              <div className="mt-5 rounded-xl border border-rose-300/25 bg-[#04111b]/80 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-rose-300/35 bg-rose-400/15 text-rose-200">
+                      <Table2 className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-100">
+                        Structured Cycle Phase Table &amp; Flow Log
+                      </h3>
+                      <p className="text-[11px] text-slate-400">
+                        First <strong className="text-rose-200">{periodDays} days</strong> are Menstrual, followed by calculated Follicular, Ovulation &amp; Luteal phases — edits sync live with Day Log &amp; Today&apos;s Daily Plan.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleStartNewCycleToday(activeGoal)}
+                      className="flex cursor-pointer items-center gap-1 rounded-lg border border-rose-300/40 bg-rose-400/15 px-2.5 py-1 text-[11px] font-semibold text-rose-100 hover:bg-rose-400/25"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      Period Started Today (New Day 1)
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowCycleTable((v) => !v)}
+                      className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/20 bg-slate-950/55 px-2.5 py-1 text-[11px] font-medium text-cyan-200 hover:border-cyan-300/45"
+                    >
+                      {showCycleTable ? (
+                        <>
+                          Hide Table <ChevronUp className="h-3.5 w-3.5" />
+                        </>
+                      ) : (
+                        <>
+                          Open Table ({activeGoal.steps.length}d){' '}
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Structured 4-Phase Range Cards */}
+                <div className="mt-3 grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+                  {(
+                    [
+                      { key: 'menstrual', range: breakdown.menstrual, tag: 'Confirmed Bleed' },
+                      { key: 'follicular', range: breakdown.follicular, tag: 'Rising Focus' },
+                      { key: 'ovulation', range: breakdown.ovulation, tag: 'Peak Clarity' },
+                      { key: 'luteal', range: breakdown.luteal, tag: 'Calm Review' },
+                    ] as const
+                  ).map((item) => {
+                    const meta = PHASE_META[item.key];
+                    return (
+                      <div
+                        key={item.key}
+                        className={`rounded-lg border px-3 py-2 text-xs ${meta.chipClass}`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-semibold">{meta.label}</span>
+                          <span className="font-mono-tabular font-bold">
+                            Days {item.range.start}–{item.range.end}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-[10px] opacity-85">
+                          {item.tag} · {meta.energy}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {showCycleTable && (
+                  <div className="mt-3.5 max-h-80 overflow-auto rounded-lg border border-cyan-200/15 bg-slate-950/65 quiet-scroll">
+                    <table className="w-full border-collapse text-left text-xs">
+                      <thead className="sticky top-0 z-10 bg-[#051624] text-[11px] text-slate-300 shadow-sm">
+                        <tr className="border-b border-cyan-200/15">
+                          <th className="px-3 py-2 font-semibold">Day #</th>
+                          <th className="px-3 py-2 font-semibold">Date</th>
+                          <th className="px-3 py-2 font-semibold">Phase</th>
+                          <th className="px-3 py-2 font-semibold">Flow</th>
+                          <th className="px-3 py-2 font-semibold">Synced Note (Daily / Day Log)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-cyan-200/[0.08]">
+                        {activeGoal.steps.map((step) => {
+                          const dateKey = step.dateLabel;
+                          const log = dateKey ? cycleLogs[dateKey] : undefined;
+                          const isCurrentDay =
+                            step.stepNumber === challengeDayInfo.currentStepNumber;
+                          const stepPhase = step.phase ?? 'menstrual';
+
+                          return (
+                            <tr
+                              key={step.stepNumber}
+                              className={
+                                isCurrentDay
+                                  ? 'bg-cyan-400/[0.09]'
+                                  : 'hover:bg-slate-900/50'
+                              }
+                            >
+                              <td className="font-mono-tabular whitespace-nowrap px-3 py-1.5 font-semibold text-slate-100">
+                                Day {step.stepNumber}
+                                {isCurrentDay && (
+                                  <span className="ml-1.5 rounded bg-cyan-400/25 px-1.5 py-0.5 text-[10px] text-cyan-100">
+                                    Today
+                                  </span>
+                                )}
+                              </td>
+                              <td className="font-mono-tabular whitespace-nowrap px-3 py-1.5 text-slate-300">
+                                {formatShortDate(dateKey) ?? `Cycle +${step.stepNumber - 1}`}
+                              </td>
+                              <td className="px-3 py-1.5">
+                                <select
+                                  aria-label={`Phase for Day ${step.stepNumber}`}
+                                  value={stepPhase}
+                                  onChange={(e) =>
+                                    handleUpdateStepPhase(
+                                      activeGoal,
+                                      step.stepNumber,
+                                      e.target.value as GoalPhaseKind
+                                    )
+                                  }
+                                  className="bio-input rounded px-2 py-1 text-[11px] font-medium text-slate-100"
+                                >
+                                  <option value="menstrual">Menstrual</option>
+                                  <option value="follicular">Follicular</option>
+                                  <option value="ovulation">Ovulation</option>
+                                  <option value="luteal">Luteal</option>
+                                </select>
+                              </td>
+                              <td className="px-3 py-1.5">
+                                {dateKey ? (
+                                  <select
+                                    aria-label={`Flow for ${dateKey}`}
+                                    value={log?.flow ?? 'none'}
+                                    onChange={(e) =>
+                                      onUpdateCycleLog(dateKey, (prev) => ({
+                                        ...prev,
+                                        dateKey,
+                                        flow: e.target.value as CycleFlowLevel,
+                                        updatedAt: Date.now(),
+                                      }))
+                                    }
+                                    className="bio-input rounded px-2 py-1 text-[11px] text-slate-100"
+                                  >
+                                    {FLOW_LEVEL_OPTIONS.map((opt) => (
+                                      <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <span className="text-[11px] text-slate-500">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-1.5">
+                                {dateKey ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="text"
+                                      value={log?.note ?? ''}
+                                      onChange={(e) => {
+                                        const val = e.target.value;
+                                        onUpdateCycleLog(dateKey, (prev) => ({
+                                          ...prev,
+                                          dateKey,
+                                          note: val,
+                                          updatedAt: Date.now(),
+                                        }));
+                                      }}
+                                      placeholder="Add note (syncs to Daily & Day Log)..."
+                                      className="bio-input w-full min-w-[170px] rounded px-2 py-1 text-[11px] text-slate-100"
+                                    />
+                                    {log?.symptoms && log.symptoms.length > 0 && (
+                                      <span className="shrink-0 rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] text-amber-200">
+                                        {log.symptoms.join(', ')}
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-[11px] text-slate-500">—</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Scope-Level Master Priorities & To-Do List + Drag into Days */}
           <div className="mt-5 rounded-xl border border-cyan-300/25 bg-[#04111b]/70 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -4239,6 +4671,20 @@ export function GoalsView({
                                 className={`inline-block h-1.5 w-1.5 rounded-full ${phaseMeta.dotClass}`}
                               />
                               {phaseMeta.label}
+                            </span>
+                          )}
+                          {step.dateLabel &&
+                            cycleLogs[step.dateLabel] &&
+                            cycleLogs[step.dateLabel].flow !== 'none' && (
+                              <span className="rounded border border-rose-300/35 bg-rose-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-100">
+                                {FLOW_LEVEL_OPTIONS.find(
+                                  (f) => f.value === cycleLogs[step.dateLabel!].flow
+                                )?.label ?? cycleLogs[step.dateLabel].flow}
+                              </span>
+                            )}
+                          {step.dateLabel && cycleLogs[step.dateLabel]?.note?.trim() && (
+                            <span className="max-w-[190px] truncate rounded bg-slate-950/70 px-1.5 py-0.5 text-[10px] text-amber-200/90">
+                              {cycleLogs[step.dateLabel].note.trim()}
                             </span>
                           )}
 

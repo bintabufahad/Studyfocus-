@@ -7,6 +7,8 @@ import {
   Flame,
   Grid3X3,
   HeartPulse,
+  Maximize2,
+  PenTool,
   Sun,
   Target,
   Trash2,
@@ -15,7 +17,9 @@ import {
 } from 'lucide-react';
 import type {
   ChecklistTableRecord,
+  CycleDayLog,
   DailyPlanRecord,
+  DayLogEntry,
   GoalPlan,
   GoalTaskEntry,
   StudySessionCard,
@@ -23,6 +27,7 @@ import type {
 import { PHASE_META } from '../utils/goalRewards';
 import { computeProductivityStats } from '../utils/profileStorage';
 import { isCellChecked } from './ChecklistTableSection';
+import { FLOW_LEVEL_OPTIONS, renderDayLogSheetToDataUrl } from './DayLogView';
 
 interface HistoryDashboardViewProps {
   profileName: string;
@@ -31,15 +36,19 @@ interface HistoryDashboardViewProps {
   checklistTables: ChecklistTableRecord[];
   activeDailyPlan: DailyPlanRecord;
   dailyHistory: DailyPlanRecord[];
+  dayLogHistory: DayLogEntry[];
+  cycleLogs: Record<string, CycleDayLog>;
   hasActiveCard: boolean;
   onDeleteLog: (cardId: string | undefined, logId: string) => void;
+  onDeleteDayLog: (dayLogId: string) => void;
   onBackToHub: () => void;
   onBackToWorkspace: () => void;
   onOpenGoalsTab: () => void;
   onOpenChecklistsTab: () => void;
+  onOpenDayLogTab: () => void;
 }
 
-type HistorySectionFilter = 'all' | 'sessions' | 'goals' | 'checklists';
+type HistorySectionFilter = 'all' | 'sessions' | 'goals' | 'checklists' | 'daylog';
 
 function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -71,15 +80,20 @@ export function HistoryDashboardView({
   checklistTables,
   activeDailyPlan,
   dailyHistory,
+  dayLogHistory,
+  cycleLogs,
   hasActiveCard,
   onDeleteLog,
+  onDeleteDayLog,
   onBackToHub,
   onBackToWorkspace,
   onOpenGoalsTab,
   onOpenChecklistsTab,
+  onOpenDayLogTab,
 }: HistoryDashboardViewProps) {
   const [hoveredDayKey, setHoveredDayKey] = useState<string | null>(null);
   const [sectionFilter, setSectionFilter] = useState<HistorySectionFilter>('all');
+  const [previewDayLogId, setPreviewDayLogId] = useState<string | null>(null);
 
   const { allTasks, allLogs } = useMemo(() => {
     const tasksWithCard = cards.flatMap((c) =>
@@ -209,9 +223,24 @@ export function HistoryDashboardView({
   );
   const hoveredDay = stats.dailySeries.find((d) => d.dateKey === hoveredDayKey);
 
+  const renderedDayLogs = useMemo(
+    () =>
+      dayLogHistory.map((entry) => ({
+        entry,
+        imageUrl: renderDayLogSheetToDataUrl(entry),
+      })),
+    [dayLogHistory]
+  );
+
+  const previewDayLogItem = useMemo(
+    () => renderedDayLogs.find((item) => item.entry.id === previewDayLogId) ?? null,
+    [previewDayLogId, renderedDayLogs]
+  );
+
   const showSessions = sectionFilter === 'all' || sectionFilter === 'sessions';
   const showGoals = sectionFilter === 'all' || sectionFilter === 'goals';
   const showChecklists = sectionFilter === 'all' || sectionFilter === 'checklists';
+  const showDayLogs = sectionFilter === 'all' || sectionFilter === 'daylog';
 
   return (
     <main className="relative z-10 mx-auto w-full max-w-[1320px] flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8 quiet-scroll">
@@ -222,7 +251,7 @@ export function HistoryDashboardView({
             {profileName}&apos;s Complete History
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            Everything in one place — study sessions, daily plans, multi-day goals, monthly phases, and checklist tables.
+            Everything in one place — study sessions, daily plans, multi-day goals, monthly phases, checklists, and 4 AM–3 AM day logs.
           </p>
         </div>
 
@@ -242,6 +271,14 @@ export function HistoryDashboardView({
           >
             <Grid3X3 className="h-3.5 w-3.5 text-cyan-300" />
             Checklists
+          </button>
+          <button
+            type="button"
+            onClick={onOpenDayLogTab}
+            className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-cyan-200/20 bg-cyan-400/[0.06] px-3 py-2 text-xs font-semibold text-cyan-100 hover:border-cyan-300/45"
+          >
+            <PenTool className="h-3.5 w-3.5 text-cyan-300" />
+            Day Log
           </button>
           <button
             type="button"
@@ -266,6 +303,10 @@ export function HistoryDashboardView({
             {
               id: 'checklists',
               label: `Checklist Tables (${checklistTables.length})`,
+            },
+            {
+              id: 'daylog',
+              label: `Day Logs 4AM–3AM (${dayLogHistory.length})`,
             },
           ] as const
         ).map((tab) => (
@@ -594,13 +635,20 @@ export function HistoryDashboardView({
                       className="rounded-xl border border-cyan-200/14 bg-[#04111b]/70 p-3.5"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="text-xs font-semibold text-slate-100">
                             {formatDateKeyLabel(day.dateKey)}
                           </span>
                           {isCurrentDay && (
                             <span className="rounded bg-cyan-400/20 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-100">
                               Today
+                            </span>
+                          )}
+                          {cycleLogs[day.dateKey] && cycleLogs[day.dateKey].flow !== 'none' && (
+                            <span className="rounded border border-rose-300/35 bg-rose-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-100">
+                              {FLOW_LEVEL_OPTIONS.find(
+                                (f) => f.value === cycleLogs[day.dateKey].flow
+                              )?.label ?? cycleLogs[day.dateKey].flow}
                             </span>
                           )}
                         </div>
@@ -612,6 +660,12 @@ export function HistoryDashboardView({
                           <span className="text-slate-400">{allItems.length} total</span>
                         </div>
                       </div>
+
+                      {cycleLogs[day.dateKey]?.note?.trim() && (
+                        <p className="mt-1.5 rounded-md border border-rose-300/20 bg-rose-500/[0.06] px-2.5 py-1 text-[11px] text-rose-100">
+                          Cycle Note: {cycleLogs[day.dateKey].note.trim()}
+                        </p>
+                      )}
 
                       {allItems.length === 0 ? (
                         <p className="mt-2 text-[11px] text-slate-500">
@@ -942,6 +996,157 @@ export function HistoryDashboardView({
             </div>
           )}
         </section>
+      )}
+      {/* SECTION 4: ARCHIVED 4 AM - 3 AM HANDWRITTEN DAY LOGS */}
+      {showDayLogs && (
+        <section className="glass-panel mt-5 rounded-xl p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <PenTool className="h-4 w-4 text-cyan-300" />
+              <div>
+                <h2 className="font-display text-base font-semibold text-slate-100">
+                  Day Logs History (4:00 AM – 3:00 AM Handwritten Sheets)
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Written stylus logs saved manually from your Day Log sheet
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenDayLogTab}
+              className="cursor-pointer rounded-lg border border-cyan-300/35 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20"
+            >
+              Open Active Sheet
+            </button>
+          </div>
+
+          {renderedDayLogs.length === 0 ? (
+            <p className="py-8 text-center text-xs text-slate-500">
+              No archived 4 AM–3 AM sheets yet. Write on the Day Log tab and click &ldquo;Save to History &amp; New Sheet&rdquo; when your day wraps up!
+            </p>
+          ) : (
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {renderedDayLogs.map(({ entry, imageUrl }) => {
+                const noteCount = Object.values(entry.hourNotes ?? {}).filter(
+                  (v) => v && v.trim().length > 0
+                ).length;
+
+                return (
+                  <article
+                    key={entry.id}
+                    className="flex flex-col overflow-hidden rounded-xl border border-cyan-200/15 bg-[#04111b]/80"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setPreviewDayLogId(entry.id)}
+                      className="group relative h-56 w-full cursor-pointer overflow-hidden border-b border-cyan-200/15 bg-[#020a14] text-left"
+                    >
+                      {imageUrl && (
+                        <img
+                          src={imageUrl}
+                          alt={entry.title?.trim() || `Day log for ${entry.dateKey}`}
+                          className="h-full w-full object-cover object-top transition-transform duration-200 group-hover:scale-[1.02]"
+                        />
+                      )}
+                      <span className="absolute right-2.5 bottom-2.5 flex items-center gap-1 rounded-md border border-cyan-300/40 bg-slate-950/85 px-2 py-1 text-[11px] font-semibold text-cyan-100">
+                        <Maximize2 className="h-3 w-3" />
+                        Inspect Full Sheet
+                      </span>
+                    </button>
+
+                    <div className="flex flex-1 flex-col justify-between gap-2 p-3.5">
+                      <div>
+                        <h3 className="truncate text-sm font-semibold text-slate-100">
+                          {entry.title?.trim() || `Day Log · ${formatDateKeyLabel(entry.dateKey)}`}
+                        </h3>
+                        <p className="font-mono-tabular mt-0.5 text-[11px] text-slate-400">
+                          {formatDateKeyLabel(entry.dateKey)} · {entry.strokes.length} strokes
+                          {noteCount > 0 ? ` · ${noteCount} tags` : ''}
+                        </p>
+                        {entry.cycleSummary && (
+                          <p className="mt-1 truncate text-[11px] font-medium text-rose-200">
+                            {entry.cycleSummary}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <a
+                          href={imageUrl}
+                          download={`day-log-${entry.dateKey}.png`}
+                          className="flex items-center gap-1 rounded-md border border-cyan-200/20 bg-slate-950/60 px-2.5 py-1 text-[11px] font-medium text-cyan-200 hover:border-cyan-300/45"
+                        >
+                          <Download className="h-3 w-3" />
+                          Download PNG
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => onDeleteDayLog(entry.id)}
+                          aria-label={`Delete day log ${entry.dateKey}`}
+                          className="cursor-pointer rounded-md p-1.5 text-slate-400 hover:bg-rose-500/15 hover:text-rose-200"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Full-Sheet Zoom Lightbox Modal */}
+      {previewDayLogItem && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm"
+          onClick={() => setPreviewDayLogId(null)}
+        >
+          <div
+            className="glass-panel flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-cyan-300/30"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-cyan-200/15 px-5 py-3.5">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-100">
+                  {previewDayLogItem.entry.title?.trim() ||
+                    `Day Log · ${formatDateKeyLabel(previewDayLogItem.entry.dateKey)}`}
+                </h3>
+                {previewDayLogItem.entry.cycleSummary && (
+                  <p className="text-xs text-rose-200">{previewDayLogItem.entry.cycleSummary}</p>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={previewDayLogItem.imageUrl}
+                  download={`day-log-${previewDayLogItem.entry.dateKey}.png`}
+                  className="bio-btn-primary flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download PNG
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setPreviewDayLogId(null)}
+                  className="cursor-pointer rounded-lg border border-cyan-200/20 bg-slate-950/60 px-3 py-1.5 text-xs text-slate-200 hover:text-white"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto bg-[#020812] p-4 quiet-scroll">
+              <img
+                src={previewDayLogItem.imageUrl}
+                alt={`Full handwritten log ${previewDayLogItem.entry.dateKey}`}
+                className="mx-auto w-full rounded-lg border border-cyan-200/15"
+              />
+            </div>
+          </div>
+        </div>
       )}
     </main>
   );

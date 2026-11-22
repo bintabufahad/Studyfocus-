@@ -254,6 +254,9 @@ interface StoredAccount {
   studyCards: unknown[];
   goals?: unknown[];
   checklistTables?: unknown[];
+  activeDayLog?: Record<string, unknown>;
+  dayLogHistory?: unknown[];
+  cycleLogs?: Record<string, unknown>;
   activeDailyPlan?: Record<string, unknown>;
   dailyHistory?: unknown[];
   gamification?: Record<string, unknown>;
@@ -384,7 +387,7 @@ function extractBearerToken(req: Request): string | null {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '4mb' }));
+  app.use(express.json({ limit: '12mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ ok: true });
@@ -407,6 +410,17 @@ async function startServer() {
     const initialChecklists = Array.isArray(req.body?.checklistTables)
       ? req.body.checklistTables
       : [];
+    const initialActiveDayLog =
+      req.body?.activeDayLog && typeof req.body.activeDayLog === 'object'
+        ? (req.body.activeDayLog as Record<string, unknown>)
+        : undefined;
+    const initialDayLogHistory = Array.isArray(req.body?.dayLogHistory)
+      ? req.body.dayLogHistory
+      : [];
+    const initialCycleLogs =
+      req.body?.cycleLogs && typeof req.body.cycleLogs === 'object'
+        ? (req.body.cycleLogs as Record<string, unknown>)
+        : undefined;
     const initialDailyPlan =
       req.body?.activeDailyPlan && typeof req.body.activeDailyPlan === 'object'
         ? (req.body.activeDailyPlan as Record<string, unknown>)
@@ -447,6 +461,9 @@ async function startServer() {
       studyCards: initialCards,
       goals: initialGoals,
       checklistTables: initialChecklists,
+      ...(initialActiveDayLog ? { activeDayLog: initialActiveDayLog } : {}),
+      dayLogHistory: initialDayLogHistory,
+      ...(initialCycleLogs ? { cycleLogs: initialCycleLogs } : {}),
       ...(initialDailyPlan ? { activeDailyPlan: initialDailyPlan } : {}),
       dailyHistory: initialDailyHistory,
       ...(initialGamification ? { gamification: initialGamification } : {}),
@@ -468,6 +485,9 @@ async function startServer() {
         studyCards: account.studyCards,
         goals: account.goals ?? [],
         checklistTables: account.checklistTables ?? [],
+        activeDayLog: account.activeDayLog,
+        dayLogHistory: account.dayLogHistory ?? [],
+        cycleLogs: account.cycleLogs ?? {},
         activeDailyPlan: account.activeDailyPlan,
         dailyHistory: account.dailyHistory ?? [],
         gamification: account.gamification,
@@ -497,6 +517,9 @@ async function startServer() {
         studyCards: account.studyCards,
         goals: account.goals ?? [],
         checklistTables: account.checklistTables ?? [],
+        activeDayLog: account.activeDayLog,
+        dayLogHistory: account.dayLogHistory ?? [],
+        cycleLogs: account.cycleLogs ?? {},
         activeDailyPlan: account.activeDailyPlan,
         dailyHistory: account.dailyHistory ?? [],
         gamification: account.gamification,
@@ -521,6 +544,9 @@ async function startServer() {
         studyCards: account.studyCards,
         goals: account.goals ?? [],
         checklistTables: account.checklistTables ?? [],
+        activeDayLog: account.activeDayLog,
+        dayLogHistory: account.dayLogHistory ?? [],
+        cycleLogs: account.cycleLogs ?? {},
         activeDailyPlan: account.activeDailyPlan,
         dailyHistory: account.dailyHistory ?? [],
         gamification: account.gamification,
@@ -549,6 +575,15 @@ async function startServer() {
     }
     if (Array.isArray(req.body?.checklistTables)) {
       account.checklistTables = req.body.checklistTables;
+    }
+    if (req.body?.activeDayLog && typeof req.body.activeDayLog === 'object') {
+      account.activeDayLog = req.body.activeDayLog as Record<string, unknown>;
+    }
+    if (Array.isArray(req.body?.dayLogHistory)) {
+      account.dayLogHistory = req.body.dayLogHistory;
+    }
+    if (req.body?.cycleLogs && typeof req.body.cycleLogs === 'object') {
+      account.cycleLogs = req.body.cycleLogs as Record<string, unknown>;
     }
     if (req.body?.activeDailyPlan && typeof req.body.activeDailyPlan === 'object') {
       account.activeDailyPlan = req.body.activeDailyPlan as Record<string, unknown>;

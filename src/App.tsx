@@ -3,6 +3,7 @@ import { CompanionStage } from './components/CompanionStage';
 import { ChecklistTableSection } from './components/ChecklistTableSection';
 import { CoStudyRoomPanel, fallbackCopyText } from './components/CoStudyRoomPanel';
 import { DailyGoalFloatingWidget } from './components/DailyGoalFloatingWidget';
+import { DayLogView } from './components/DayLogView';
 import { GoalsView } from './components/GoalsView';
 import { HistoryDashboardView } from './components/HistoryDashboardView';
 import { ParticleBackground } from './components/ParticleBackground';
@@ -18,9 +19,12 @@ import type {
   AppView,
   ChecklistTableRecord,
   CompanionPose,
+  CycleDayLog,
   DailyPlanRecord,
+  DayLogEntry,
   GamificationStats,
   GoalPlan,
+  GoalStep,
   PlaylistItem,
   SessionLog,
   SprintPhase,
@@ -34,6 +38,7 @@ import type {
 } from './types';
 import {
   createDefaultDailyPlan,
+  createDefaultDayLog,
   createNewProfile,
   createStudyCard,
   DEFAULT_GAMIFICATION_STATS,
@@ -54,7 +59,7 @@ import {
   syncAccountCards,
   toLocalDateKey,
 } from './utils/profileStorage';
-import { applyGoalCompletionReward } from './utils/goalRewards';
+import { applyGoalCompletionReward, computeCyclePhaseForDay } from './utils/goalRewards';
 import { playCueSound } from './utils/soundCues';
 
 function makeId(prefix = 'id'): string {
@@ -150,6 +155,18 @@ export default function App() {
   const dailyHistory = useMemo(
     () => activeProfile?.dailyHistory ?? [],
     [activeProfile?.dailyHistory]
+  );
+  const activeDayLog = useMemo(
+    () => activeProfile?.activeDayLog ?? createDefaultDayLog(),
+    [activeProfile?.activeDayLog]
+  );
+  const dayLogHistory = useMemo(
+    () => activeProfile?.dayLogHistory ?? [],
+    [activeProfile?.dayLogHistory]
+  );
+  const cycleLogs = useMemo(
+    () => activeProfile?.cycleLogs ?? {},
+    [activeProfile?.cycleLogs]
   );
   const gamification = activeProfile?.gamification ?? DEFAULT_GAMIFICATION_STATS;
 
@@ -319,6 +336,9 @@ export default function App() {
           studyCards: account.studyCards,
           goals: account.goals ?? [],
           checklistTables: account.checklistTables ?? [],
+          activeDayLog: account.activeDayLog ?? createDefaultDayLog(),
+          dayLogHistory: account.dayLogHistory ?? [],
+          cycleLogs: account.cycleLogs ?? {},
           activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
           dailyHistory: account.dailyHistory ?? [],
           gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -348,6 +368,15 @@ export default function App() {
   const cloudSyncDailyHistory = activeProfile?.isCloudAccount
     ? activeProfile.dailyHistory ?? []
     : null;
+  const cloudSyncDayLog = activeProfile?.isCloudAccount
+    ? activeProfile.activeDayLog ?? createDefaultDayLog()
+    : null;
+  const cloudSyncDayLogHistory = activeProfile?.isCloudAccount
+    ? activeProfile.dayLogHistory ?? []
+    : null;
+  const cloudSyncCycleLogs = activeProfile?.isCloudAccount
+    ? activeProfile.cycleLogs ?? {}
+    : null;
   const cloudSyncGamification = activeProfile?.isCloudAccount
     ? activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS
     : null;
@@ -369,7 +398,12 @@ export default function App() {
         cloudSyncGamification ?? undefined,
         cloudSyncDaily ?? undefined,
         cloudSyncDailyHistory ?? undefined,
-        cloudSyncChecklistTables ?? undefined
+        cloudSyncChecklistTables ?? undefined,
+        {
+          activeDayLog: cloudSyncDayLog ?? undefined,
+          dayLogHistory: cloudSyncDayLogHistory ?? undefined,
+          cycleLogs: cloudSyncCycleLogs ?? undefined,
+        }
       );
       if (ok) {
         hasUnsyncedCloudRef.current = false;
@@ -383,8 +417,11 @@ export default function App() {
     authToken,
     cloudSyncCards,
     cloudSyncChecklistTables,
+    cloudSyncCycleLogs,
     cloudSyncDaily,
     cloudSyncDailyHistory,
+    cloudSyncDayLog,
+    cloudSyncDayLogHistory,
     cloudSyncGamification,
     cloudSyncGoals,
   ]);
@@ -400,7 +437,12 @@ export default function App() {
           activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS,
           activeProfile.activeDailyPlan,
           activeProfile.dailyHistory ?? [],
-          activeProfile.checklistTables ?? []
+          activeProfile.checklistTables ?? [],
+          {
+            activeDayLog: activeProfile.activeDayLog,
+            dayLogHistory: activeProfile.dayLogHistory ?? [],
+            cycleLogs: activeProfile.cycleLogs ?? {},
+          }
         );
       }
     };
@@ -1043,6 +1085,14 @@ export default function App() {
       activeProfile && !activeProfile.isCloudAccount
         ? activeProfile.checklistTables ?? []
         : [];
+    const starterDaySync =
+      activeProfile && !activeProfile.isCloudAccount
+        ? {
+            activeDayLog: activeProfile.activeDayLog ?? createDefaultDayLog(),
+            dayLogHistory: activeProfile.dayLogHistory ?? [],
+            cycleLogs: activeProfile.cycleLogs ?? {},
+          }
+        : undefined;
 
     const { token, account } = await registerAccount(
       username,
@@ -1052,7 +1102,8 @@ export default function App() {
       starterGamification,
       starterDailyPlan,
       starterDailyHistory,
-      starterChecklistTables
+      starterChecklistTables,
+      starterDaySync
     );
     if (token) setAuthToken(token);
     lastCloudUpdatedAtRef.current = account.updatedAt;
@@ -1065,6 +1116,9 @@ export default function App() {
       studyCards: account.studyCards,
       goals: account.goals ?? [],
       checklistTables: account.checklistTables ?? [],
+      activeDayLog: account.activeDayLog ?? createDefaultDayLog(),
+      dayLogHistory: account.dayLogHistory ?? [],
+      cycleLogs: account.cycleLogs ?? {},
       activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
       dailyHistory: account.dailyHistory ?? [],
       gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -1102,6 +1156,9 @@ export default function App() {
       studyCards: account.studyCards,
       goals: account.goals ?? [],
       checklistTables: account.checklistTables ?? [],
+      activeDayLog: account.activeDayLog ?? createDefaultDayLog(),
+      dayLogHistory: account.dayLogHistory ?? [],
+      cycleLogs: account.cycleLogs ?? {},
       activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
       dailyHistory: account.dailyHistory ?? [],
       gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -1136,7 +1193,12 @@ export default function App() {
         activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS,
         activeProfile.activeDailyPlan,
         activeProfile.dailyHistory ?? [],
-        activeProfile.checklistTables ?? []
+        activeProfile.checklistTables ?? [],
+        {
+          activeDayLog: activeProfile.activeDayLog,
+          dayLogHistory: activeProfile.dayLogHistory ?? [],
+          cycleLogs: activeProfile.cycleLogs ?? {},
+        }
       );
     }
     setAuthToken(null);
@@ -2363,6 +2425,131 @@ export default function App() {
     [updateActiveProfile]
   );
 
+  const handleUpdateActiveDayLog = useCallback(
+    (updater: (prev: DayLogEntry) => DayLogEntry) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        activeDayLog: updater(profile.activeDayLog ?? createDefaultDayLog()),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
+  const handleArchiveDayLog = useCallback(
+    (snapshot: DayLogEntry, resetAfterArchive: boolean) => {
+      const archivedEntry: DayLogEntry = {
+        ...snapshot,
+        id: resetAfterArchive ? snapshot.id : makeId('dlog'),
+        archivedAt: Date.now(),
+      };
+      updateActiveProfile((profile) => ({
+        ...profile,
+        dayLogHistory: [archivedEntry, ...(profile.dayLogHistory ?? [])].slice(0, 90),
+        activeDayLog: resetAfterArchive
+          ? createDefaultDayLog()
+          : profile.activeDayLog ?? createDefaultDayLog(),
+      }));
+      playCueSound('goal_tick');
+    },
+    [updateActiveProfile]
+  );
+
+  const handleDeleteDayLog = useCallback(
+    (dayLogId: string) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        dayLogHistory: (profile.dayLogHistory ?? []).filter((d) => d.id !== dayLogId),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
+  const handleUpdateCycleLog = useCallback(
+    (dateKey: string, updater: (prev: CycleDayLog) => CycleDayLog) => {
+      updateActiveProfile((profile) => {
+        const existingMap = profile.cycleLogs ?? {};
+        const prevLog: CycleDayLog = existingMap[dateKey] ?? {
+          dateKey,
+          flow: 'none',
+          symptoms: [],
+          note: '',
+          updatedAt: Date.now(),
+        };
+        return {
+          ...profile,
+          cycleLogs: {
+            ...existingMap,
+            [dateKey]: updater(prevLog),
+          },
+        };
+      });
+    },
+    [updateActiveProfile]
+  );
+
+  const handleQuickStartPeriodGoal = useCallback(() => {
+    const todayIso = toLocalDateKey(Date.now());
+    const periodDays = 6;
+    const totalDays = 28;
+    const steps: GoalStep[] = Array.from({ length: totalDays }, (_, idx) => {
+      const stepNum = idx + 1;
+      const base = new Date(`${todayIso}T00:00:00`);
+      base.setDate(base.getDate() + idx);
+      const y = base.getFullYear();
+      const m = String(base.getMonth() + 1).padStart(2, '0');
+      const d = String(base.getDate()).padStart(2, '0');
+      const dateLabel = `${y}-${m}-${d}`;
+      return {
+        stepNumber: stepNum,
+        dateLabel,
+        monthKey: dateLabel.slice(0, 7),
+        phase: computeCyclePhaseForDay(stepNum, totalDays, periodDays),
+        priorities: [
+          {
+            id: makeId('pri'),
+            kind: 'priority',
+            text: '',
+            status: 'empty',
+          },
+        ],
+        todos: [
+          { id: makeId('todo'), kind: 'todo', text: '', status: 'empty' },
+          { id: makeId('todo'), kind: 'todo', text: '', status: 'empty' },
+          { id: makeId('todo'), kind: 'todo', text: '', status: 'empty' },
+        ],
+        taskText: '',
+        status: 'empty',
+        carryovers: [],
+      };
+    });
+
+    const now = Date.now();
+    const newGoal: GoalPlan = {
+      id: makeId('goal'),
+      title: 'My Cycle Tracker',
+      cadence: 'phase',
+      unit: 'phase_days',
+      totalSteps: totalDays,
+      startDate: todayIso,
+      endDate: steps[steps.length - 1]?.dateLabel,
+      phaseConfig: {
+        cycleDates: [todayIso],
+        periodLengthDays: periodDays,
+        averageCycleDays: totalDays,
+        dataMode: '1month',
+      },
+      accent: 'rose',
+      steps,
+      trailingCarryovers: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    handleUpdateGoals((prev) => [newGoal, ...prev]);
+    playCueSound('goal_tick');
+    setActiveView('goals');
+  }, [handleUpdateGoals]);
+
   const unfinishedImportCount = useMemo(() => {
     if (activeDailyPlan.dismissedImportBanner) return 0;
     let count = 0;
@@ -2607,10 +2794,13 @@ export default function App() {
           activeDailyPlan={activeDailyPlan}
           dailyHistory={dailyHistory}
           gamification={gamification}
+          cycleLogs={cycleLogs}
           onUpdateGoals={handleUpdateGoals}
           onUpdateDailyPlan={handleUpdateDailyPlan}
           onUpdateDailyHistory={handleUpdateDailyHistory}
           onUpdateGamification={handleUpdateGamification}
+          onUpdateCycleLog={handleUpdateCycleLog}
+          onOpenDayLogTab={() => setActiveView('daylog')}
         />
       ) : activeView === 'checklists' ? (
         <ChecklistTableSection
@@ -2624,6 +2814,19 @@ export default function App() {
             playCueSound(res.leveledUpTo ? 'goal_levelup' : 'goal_tick');
           }}
         />
+      ) : activeView === 'daylog' ? (
+        <DayLogView
+          activeDayLog={activeDayLog}
+          dayLogHistory={dayLogHistory}
+          goals={goals}
+          cycleLogs={cycleLogs}
+          onUpdateActiveDayLog={handleUpdateActiveDayLog}
+          onArchiveDayLog={handleArchiveDayLog}
+          onUpdateCycleLog={handleUpdateCycleLog}
+          onQuickStartPeriodGoal={handleQuickStartPeriodGoal}
+          onOpenHistoryTab={() => setActiveView('history')}
+          onOpenGoalsTab={() => setActiveView('goals')}
+        />
       ) : (
         <HistoryDashboardView
           profileName={profileName}
@@ -2632,12 +2835,16 @@ export default function App() {
           checklistTables={checklistTables}
           activeDailyPlan={activeDailyPlan}
           dailyHistory={dailyHistory}
+          dayLogHistory={dayLogHistory}
+          cycleLogs={cycleLogs}
           hasActiveCard={Boolean(activeCard)}
           onDeleteLog={handleDeleteLog}
+          onDeleteDayLog={handleDeleteDayLog}
           onBackToHub={() => setActiveView('hub')}
           onBackToWorkspace={() => setActiveView(activeCard ? 'workspace' : 'hub')}
           onOpenGoalsTab={() => setActiveView('goals')}
           onOpenChecklistsTab={() => setActiveView('checklists')}
+          onOpenDayLogTab={() => setActiveView('daylog')}
         />
       )}
 

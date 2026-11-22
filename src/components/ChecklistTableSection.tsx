@@ -3,6 +3,7 @@ import {
   Calendar,
   Check,
   CheckSquare,
+  ChevronDown,
   Grid3X3,
   Layers,
   ListChecks,
@@ -65,6 +66,118 @@ const CADENCE_LABELS: Record<ChecklistCadence, string> = {
   month: 'Month Challenge',
   custom: 'Custom Dates',
 };
+
+interface ChecklistTemplateDef {
+  id: string;
+  name: string;
+  description: string;
+  defaultTitle: string;
+  cadence: ChecklistCadence;
+  accent: StudySessionCard['accent'];
+  columnLabels?: string[];
+  rows: string[];
+}
+
+const CHECKLIST_TEMPLATES: ChecklistTemplateDef[] = [
+  {
+    id: 'blank',
+    name: 'Blank / Custom Checklist',
+    description: 'Start fresh with 3 editable starter items',
+    defaultTitle: '',
+    cadence: 'checklist',
+    accent: 'sky',
+    rows: ['Item 1', 'Item 2', 'Item 3'],
+  },
+  {
+    id: 'weekly-routine',
+    name: 'Weekly Routine',
+    description: 'Mon–Sun columns for daily rhythms & anchors',
+    defaultTitle: 'Weekly Routine',
+    cadence: 'week',
+    accent: 'sky',
+    columnLabels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+    rows: [
+      'Morning Hydration & Stretch',
+      'Deep Focus Block',
+      '20m Walk / Movement',
+      'Evening Review & Reset',
+    ],
+  },
+  {
+    id: 'project-tracker',
+    name: 'Project Tracker',
+    description: 'Stage columns from Plan to Final',
+    defaultTitle: 'Project Tracker',
+    cadence: 'quick',
+    accent: 'amber',
+    columnLabels: ['Plan', 'Draft', 'Review', 'Final'],
+    rows: [
+      'Research & Outline',
+      'Core Implementation',
+      'Testing & Polish',
+      'Final Delivery',
+    ],
+  },
+  {
+    id: 'medicine-care',
+    name: 'Daily Care & Medicine',
+    description: '7-day tracker for doses, water & health',
+    defaultTitle: 'Daily Care & Medicine',
+    cadence: 'week',
+    accent: 'emerald',
+    columnLabels: ['Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Day 7'],
+    rows: [
+      'Morning Medicine',
+      'Vitamins / Afternoon Dose',
+      '2L Water Intake',
+      'Walking / Gentle Movement',
+    ],
+  },
+  {
+    id: 'study-exam',
+    name: 'Study & Exam Prep',
+    description: 'Track Lecture, Notes, Practice & Recall per topic',
+    defaultTitle: 'Study & Exam Prep',
+    cadence: 'quick',
+    accent: 'rose',
+    columnLabels: ['Lecture', 'Notes', 'Practice', 'Recall'],
+    rows: [
+      'Chapter 1',
+      'Chapter 2',
+      'Chapter 3',
+      'Past Paper Practice',
+    ],
+  },
+  {
+    id: 'monthly-habits',
+    name: 'Monthly Habit Grid',
+    description: 'Full calendar month days for core daily habits',
+    defaultTitle: 'Monthly Habit Grid',
+    cadence: 'month',
+    accent: 'emerald',
+    rows: [
+      'Read 20 Pages',
+      'Exercise / Movement',
+      '1h Distraction-Free Work',
+      'Sleep Before 11 PM',
+    ],
+  },
+  {
+    id: 'trip-packing',
+    name: 'Packing & Prep Checklist',
+    description: 'Single-column checklist you can expand anytime',
+    defaultTitle: 'Trip Packing Checklist',
+    cadence: 'checklist',
+    accent: 'sky',
+    columnLabels: ['Packed'],
+    rows: [
+      'ID / Passport & Wallet',
+      'Phone & Laptop Chargers',
+      'Medications & Toiletries',
+      'Outfits & Weather Gear',
+    ],
+  },
+];
 
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -183,6 +296,7 @@ export function ChecklistTableSection({
   const [showCreator, setShowCreator] = useState<boolean>(() => tables.length === 0);
 
   // Builder state (NO pre-asking how many rows/cols — user decides names & additions right on the sheet!)
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('blank');
   const [newTitle, setNewTitle] = useState('');
   const [titleError, setTitleError] = useState(false);
   const [builderCadence, setBuilderCadence] = useState<ChecklistCadence>('checklist');
@@ -192,6 +306,30 @@ export function ChecklistTableSection({
   const [monthEnd, setMonthEnd] = useState(currentMonthKey);
   const [customStart, setCustomStart] = useState(todayIso);
   const [customEnd, setCustomEnd] = useState(() => addDaysIso(todayIso, 6));
+
+  const selectedTemplate = useMemo(
+    () => CHECKLIST_TEMPLATES.find((t) => t.id === selectedTemplateId) ?? CHECKLIST_TEMPLATES[0],
+    [selectedTemplateId]
+  );
+
+  const handleSelectTemplate = (templateId: string) => {
+    const nextTpl =
+      CHECKLIST_TEMPLATES.find((t) => t.id === templateId) ?? CHECKLIST_TEMPLATES[0];
+    const prevTpl = selectedTemplate;
+
+    setSelectedTemplateId(nextTpl.id);
+    setBuilderCadence(nextTpl.cadence);
+    setAccent(nextTpl.accent);
+
+    const trimmedCurrent = newTitle.trim();
+    const wasAutoTitle =
+      trimmedCurrent.length === 0 ||
+      (prevTpl.defaultTitle && trimmedCurrent === prevTpl.defaultTitle);
+    if (wasAutoTitle) {
+      setNewTitle(nextTpl.defaultTitle);
+      setTitleError(false);
+    }
+  };
 
   // Filter tabs inside active Week / Month checklist
   const [selectedWeekTab, setSelectedWeekTab] = useState<'all' | number>('all');
@@ -241,20 +379,37 @@ export function ChecklistTableSection({
     let startDate: string | undefined;
     let endDate: string | undefined;
 
+    const templateCols =
+      selectedTemplate.id !== 'blank' &&
+      selectedTemplate.columnLabels &&
+      selectedTemplate.cadence === builderCadence
+        ? selectedTemplate.columnLabels
+        : null;
+
     if (builderCadence === 'checklist') {
-      columns = [{ id: makeId('col'), label: 'Done' }];
-    } else if (builderCadence === 'quick') {
-      columns = Array.from({ length: 5 }, (_, i) => ({
+      columns = (templateCols ?? ['Done']).map((label) => ({
         id: makeId('col'),
-        label: `${i + 1}`,
+        label,
+      }));
+    } else if (builderCadence === 'quick') {
+      const labels = templateCols ?? ['1', '2', '3', '4', '5'];
+      columns = labels.map((label) => ({
+        id: makeId('col'),
+        label,
       }));
     } else if (builderCadence === 'week') {
       const totalDays = parsedWeeks * 7;
       columns = Array.from({ length: totalDays }, (_, i) => {
         const dk = addDaysIso(todayIso, i);
+        let label = `Day ${i + 1}`;
+        if (templateCols && templateCols.length === 7) {
+          const dayName = templateCols[i % 7];
+          const wkNum = Math.floor(i / 7) + 1;
+          label = parsedWeeks > 1 ? `W${wkNum} ${dayName}` : dayName;
+        }
         return {
           id: makeId('col'),
-          label: `Day ${i + 1}`,
+          label,
           dateKey: dk,
         };
       });
@@ -270,6 +425,11 @@ export function ChecklistTableSection({
       endDate = columns[columns.length - 1]?.dateKey;
     }
 
+    const rows: ChecklistRow[] =
+      selectedTemplate.id !== 'blank' && selectedTemplate.rows.length > 0
+        ? selectedTemplate.rows.map((label) => ({ id: makeId('row'), label }))
+        : makeStarterRows();
+
     const now = Date.now();
     const record: ChecklistTableRecord = {
       id: makeId('tbl'),
@@ -279,7 +439,7 @@ export function ChecklistTableSection({
       ...(startDate ? { startDate } : {}),
       ...(endDate ? { endDate } : {}),
       columns,
-      rows: makeStarterRows(),
+      rows,
       checks: {},
       checkTimestamps: {},
       createdAt: now,
@@ -292,6 +452,7 @@ export function ChecklistTableSection({
     setSelectedMonthTab('all');
     setShowCreator(false);
     setNewTitle('');
+    setSelectedTemplateId('blank');
     showNotice(`Created "${record.title}" — click any item or column name to rename it!`);
   };
 
@@ -647,8 +808,101 @@ export function ChecklistTableSection({
                 Create a Checklist or Table
               </h2>
               <p className="mt-0.5 text-xs text-slate-300">
-                Just give it a name and pick a starting layout — you&apos;ll name your items &amp; add extra rows or columns right inside the table after creating.
+                Pick a common template from the menu or start blank — you can rename items &amp; add rows or columns right inside the live table anytime.
               </p>
+            </div>
+
+            {/* Common Checklist Templates Menu */}
+            <div className="space-y-3 rounded-xl border border-cyan-300/25 bg-[#041322]/80 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <label
+                    htmlFor="checklist-template-menu"
+                    className="flex items-center gap-1.5 text-xs font-semibold text-cyan-100"
+                  >
+                    <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                    Checklist Template Menu
+                  </label>
+                  <p className="mt-0.5 text-[11px] text-slate-400">
+                    Choose a starter template (e.g. Weekly Routine, Project Tracker) or start blank.
+                  </p>
+                </div>
+
+                <div className="relative min-w-[230px] sm:w-72">
+                  <select
+                    id="checklist-template-menu"
+                    value={selectedTemplateId}
+                    onChange={(e) => handleSelectTemplate(e.target.value)}
+                    className="bio-input w-full cursor-pointer appearance-none rounded-xl px-3.5 py-2 pr-9 text-xs font-medium text-white"
+                  >
+                    {CHECKLIST_TEMPLATES.map((tpl) => (
+                      <option key={tpl.id} value={tpl.id} className="bg-[#061829] text-white">
+                        {tpl.name}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cyan-200" />
+                </div>
+              </div>
+
+              {/* Quick Template Pills */}
+              <div className="flex flex-wrap gap-1.5">
+                {CHECKLIST_TEMPLATES.map((tpl) => {
+                  const isPicked = selectedTemplateId === tpl.id;
+                  return (
+                    <button
+                      key={tpl.id}
+                      type="button"
+                      onClick={() => handleSelectTemplate(tpl.id)}
+                      className={`cursor-pointer rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                        isPicked
+                          ? 'bio-glow-chip'
+                          : 'border-cyan-200/15 bg-slate-950/55 text-slate-300 hover:border-cyan-300/40 hover:text-white'
+                      }`}
+                    >
+                      {tpl.name}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Live Template Preview */}
+              {selectedTemplate.id !== 'blank' && (
+                <div className="rounded-lg border border-cyan-200/15 bg-slate-950/60 px-3 py-2.5 text-[11px]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-cyan-100">
+                    <span className="font-medium">{selectedTemplate.description}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectTemplate('blank')}
+                      className="cursor-pointer text-slate-400 underline-offset-2 hover:text-slate-200 hover:underline"
+                    >
+                      Reset to blank
+                    </button>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5 text-slate-300">
+                    <span className="text-slate-400">Columns:</span>
+                    {(selectedTemplate.columnLabels ?? ['1..Month Days']).map((col) => (
+                      <span
+                        key={col}
+                        className="rounded border border-cyan-200/20 bg-cyan-400/10 px-1.5 py-0.5 text-[10px] text-cyan-100"
+                      >
+                        {col}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-slate-300">
+                    <span className="text-slate-400">Starter rows:</span>
+                    {selectedTemplate.rows.map((row) => (
+                      <span
+                        key={row}
+                        className="rounded border border-amber-200/20 bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-100"
+                      >
+                        {row}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
