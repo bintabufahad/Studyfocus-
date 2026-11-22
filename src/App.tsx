@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CompanionStage } from './components/CompanionStage';
+import { ChecklistTableSection } from './components/ChecklistTableSection';
 import { CoStudyRoomPanel, fallbackCopyText } from './components/CoStudyRoomPanel';
 import { DailyGoalFloatingWidget } from './components/DailyGoalFloatingWidget';
 import { GoalsView } from './components/GoalsView';
@@ -15,6 +16,7 @@ import { useLiveVoice, type LiveToolAction } from './hooks/useLiveVoice';
 import { useStudyRoom } from './hooks/useStudyRoom';
 import type {
   AppView,
+  ChecklistTableRecord,
   CompanionPose,
   DailyPlanRecord,
   GamificationStats,
@@ -136,7 +138,11 @@ export default function App() {
     profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null;
   const profileName = activeProfile?.name ?? 'Guest';
   const studyCards = activeProfile?.studyCards ?? [];
-  const goals = activeProfile?.goals ?? [];
+  const goals = useMemo(() => activeProfile?.goals ?? [], [activeProfile?.goals]);
+  const checklistTables = useMemo(
+    () => activeProfile?.checklistTables ?? [],
+    [activeProfile?.checklistTables]
+  );
   const activeDailyPlan = useMemo(
     () => activeProfile?.activeDailyPlan ?? createDefaultDailyPlan(),
     [activeProfile?.activeDailyPlan]
@@ -312,6 +318,7 @@ export default function App() {
           createdAt: account.createdAt,
           studyCards: account.studyCards,
           goals: account.goals ?? [],
+          checklistTables: account.checklistTables ?? [],
           activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
           dailyHistory: account.dailyHistory ?? [],
           gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -334,6 +341,9 @@ export default function App() {
 
   const cloudSyncCards = activeProfile?.isCloudAccount ? activeProfile.studyCards : null;
   const cloudSyncGoals = activeProfile?.isCloudAccount ? activeProfile.goals ?? [] : null;
+  const cloudSyncChecklistTables = activeProfile?.isCloudAccount
+    ? activeProfile.checklistTables ?? []
+    : null;
   const cloudSyncDaily = activeProfile?.isCloudAccount ? activeProfile.activeDailyPlan : null;
   const cloudSyncDailyHistory = activeProfile?.isCloudAccount
     ? activeProfile.dailyHistory ?? []
@@ -358,7 +368,8 @@ export default function App() {
         cloudSyncGoals ?? undefined,
         cloudSyncGamification ?? undefined,
         cloudSyncDaily ?? undefined,
-        cloudSyncDailyHistory ?? undefined
+        cloudSyncDailyHistory ?? undefined,
+        cloudSyncChecklistTables ?? undefined
       );
       if (ok) {
         hasUnsyncedCloudRef.current = false;
@@ -371,6 +382,7 @@ export default function App() {
   }, [
     authToken,
     cloudSyncCards,
+    cloudSyncChecklistTables,
     cloudSyncDaily,
     cloudSyncDailyHistory,
     cloudSyncGamification,
@@ -387,7 +399,8 @@ export default function App() {
           activeProfile.goals ?? [],
           activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS,
           activeProfile.activeDailyPlan,
-          activeProfile.dailyHistory ?? []
+          activeProfile.dailyHistory ?? [],
+          activeProfile.checklistTables ?? []
         );
       }
     };
@@ -1026,6 +1039,10 @@ export default function App() {
         : createDefaultDailyPlan();
     const starterDailyHistory =
       activeProfile && !activeProfile.isCloudAccount ? activeProfile.dailyHistory ?? [] : [];
+    const starterChecklistTables =
+      activeProfile && !activeProfile.isCloudAccount
+        ? activeProfile.checklistTables ?? []
+        : [];
 
     const { token, account } = await registerAccount(
       username,
@@ -1034,7 +1051,8 @@ export default function App() {
       starterGoals,
       starterGamification,
       starterDailyPlan,
-      starterDailyHistory
+      starterDailyHistory,
+      starterChecklistTables
     );
     if (token) setAuthToken(token);
     lastCloudUpdatedAtRef.current = account.updatedAt;
@@ -1046,6 +1064,7 @@ export default function App() {
       createdAt: account.createdAt,
       studyCards: account.studyCards,
       goals: account.goals ?? [],
+      checklistTables: account.checklistTables ?? [],
       activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
       dailyHistory: account.dailyHistory ?? [],
       gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -1082,6 +1101,7 @@ export default function App() {
       createdAt: account.createdAt,
       studyCards: account.studyCards,
       goals: account.goals ?? [],
+      checklistTables: account.checklistTables ?? [],
       activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
       dailyHistory: account.dailyHistory ?? [],
       gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -1115,7 +1135,8 @@ export default function App() {
         activeProfile.goals ?? [],
         activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS,
         activeProfile.activeDailyPlan,
-        activeProfile.dailyHistory ?? []
+        activeProfile.dailyHistory ?? [],
+        activeProfile.checklistTables ?? []
       );
     }
     setAuthToken(null);
@@ -1125,11 +1146,9 @@ export default function App() {
     nextAlertAtRef.current = null;
     saveTimerSnapshot(null);
 
-    setProfiles((prev) => {
-      const localOnly = prev.filter((p) => !p.isCloudAccount);
-      setActiveProfileId(localOnly[0]?.id ?? null);
-      return localOnly;
-    });
+    const localOnly = profiles.filter((p) => !p.isCloudAccount);
+    setProfiles((prev) => prev.filter((p) => !p.isCloudAccount));
+    setActiveProfileId(localOnly[0]?.id ?? null);
     setActiveCardId(null);
     setActiveView('hub');
     setIsFocusRunning(false);
@@ -1157,15 +1176,13 @@ export default function App() {
   };
 
   const handleDeleteProfile = (id: string) => {
-    setProfiles((prev) => {
-      const remaining = prev.filter((p) => p.id !== id);
-      if (id === activeProfileId && remaining.length > 0) {
-        setActiveProfileId(remaining[0].id);
-        setActiveCardId(null);
-        setActiveView('hub');
-      }
-      return remaining;
-    });
+    const remaining = profiles.filter((p) => p.id !== id);
+    setProfiles((prev) => prev.filter((p) => p.id !== id));
+    if (id === activeProfileId && remaining.length > 0) {
+      setActiveProfileId(remaining[0].id);
+      setActiveCardId(null);
+      setActiveView('hub');
+    }
   };
 
   const handleImportCardsBackup = (rawCards: StudySessionCard[]) => {
@@ -2306,6 +2323,16 @@ export default function App() {
     [updateActiveProfile]
   );
 
+  const handleUpdateChecklistTables = useCallback(
+    (updater: (prev: ChecklistTableRecord[]) => ChecklistTableRecord[]) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        checklistTables: updater(profile.checklistTables ?? []),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
   const handleUpdateDailyPlan = useCallback(
     (updater: (prev: DailyPlanRecord) => DailyPlanRecord) => {
       updateActiveProfile((profile) => ({
@@ -2585,14 +2612,32 @@ export default function App() {
           onUpdateDailyHistory={handleUpdateDailyHistory}
           onUpdateGamification={handleUpdateGamification}
         />
+      ) : activeView === 'checklists' ? (
+        <ChecklistTableSection
+          tables={checklistTables}
+          onUpdateTables={handleUpdateChecklistTables}
+          onCellTickedReward={() => {
+            const res = applyGoalCompletionReward(gamification, 25, false);
+            handleUpdateGamification((prev) =>
+              applyGoalCompletionReward(prev, 25, false).nextStats
+            );
+            playCueSound(res.leveledUpTo ? 'goal_levelup' : 'goal_tick');
+          }}
+        />
       ) : (
         <HistoryDashboardView
           profileName={profileName}
           cards={studyCards}
+          goals={goals}
+          checklistTables={checklistTables}
+          activeDailyPlan={activeDailyPlan}
+          dailyHistory={dailyHistory}
           hasActiveCard={Boolean(activeCard)}
           onDeleteLog={handleDeleteLog}
           onBackToHub={() => setActiveView('hub')}
           onBackToWorkspace={() => setActiveView(activeCard ? 'workspace' : 'hub')}
+          onOpenGoalsTab={() => setActiveView('goals')}
+          onOpenChecklistsTab={() => setActiveView('checklists')}
         />
       )}
 

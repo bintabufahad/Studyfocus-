@@ -166,6 +166,11 @@ export interface GoalStep {
   carryovers: GoalCarryoverItem[];
 }
 
+export interface GoalScopePlan {
+  priorities: GoalTaskEntry[];
+  todos: GoalTaskEntry[];
+}
+
 export interface GoalPlan {
   id: string;
   title: string;
@@ -178,6 +183,7 @@ export interface GoalPlan {
   endMonth?: string; // YYYY-MM
   phaseConfig?: PhaseConfig;
   accent: StudySessionCard['accent'];
+  scopePlans?: Record<string, GoalScopePlan>;
   steps: GoalStep[];
   trailingCarryovers?: GoalCarryoverItem[];
   createdAt: number;
@@ -194,12 +200,41 @@ export interface GamificationStats {
   unlockedBadges: string[];
 }
 
+export type ChecklistCadence = 'checklist' | 'quick' | 'week' | 'month' | 'custom';
+
+export interface ChecklistColumn {
+  id: string;
+  label: string;
+  dateKey?: string;
+}
+
+export interface ChecklistRow {
+  id: string;
+  label: string;
+}
+
+export interface ChecklistTableRecord {
+  id: string;
+  title: string;
+  cadence?: ChecklistCadence;
+  accent: StudySessionCard['accent'];
+  startDate?: string;
+  endDate?: string;
+  columns: ChecklistColumn[];
+  rows: ChecklistRow[];
+  checks: Record<string, boolean>;
+  checkTimestamps?: Record<string, number>;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface UserProfile {
   id: string;
   name: string;
   createdAt: number;
   studyCards: StudySessionCard[];
   goals?: GoalPlan[];
+  checklistTables?: ChecklistTableRecord[];
   activeDailyPlan?: DailyPlanRecord;
   dailyHistory?: DailyPlanRecord[];
   gamification?: GamificationStats;
@@ -245,5 +280,5 @@ export interface SharedVideoState {
   updatedBy: string;
 }
 
-export type AppView = 'hub' | 'workspace' | 'goals' | 'history';
+export type AppView = 'hub' | 'workspace' | 'goals' | 'checklists' | 'history';
 

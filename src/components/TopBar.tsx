@@ -77,6 +77,18 @@ export function TopBar({
 
           <button
             type="button"
+            onClick={() => onSelectView('checklists')}
+            className={`cursor-pointer text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-300 ${
+              activeView === 'checklists'
+                ? 'text-cyan-300 underline decoration-cyan-300 decoration-2 underline-offset-8 drop-shadow-[0_0_8px_rgba(103,232,249,0.5)]'
+                : 'text-slate-300/80 hover:text-cyan-100'
+            }`}
+          >
+            Checklists
+          </button>
+
+          <button
+            type="button"
             onClick={() => onSelectView('history')}
             className={`cursor-pointer text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-300 ${
               activeView === 'history'

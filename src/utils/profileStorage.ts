@@ -1,10 +1,14 @@
 import type {
   ActiveTimerSnapshot,
+  ChecklistColumn,
+  ChecklistRow,
+  ChecklistTableRecord,
   DailyPlanRecord,
   GamificationStats,
   GoalCadence,
   GoalPhaseKind,
   GoalPlan,
+  GoalScopePlan,
   GoalStep,
   GoalTaskEntry,
   GoalUnit,
@@ -71,6 +75,7 @@ export function createNewProfile(name: string, id?: string, isCloudAccount = fal
     createdAt: Date.now(),
     studyCards: [],
     goals: [],
+    checklistTables: [],
     gamification: { ...DEFAULT_GAMIFICATION_STATS },
     isCloudAccount,
   };
@@ -368,7 +373,7 @@ export function normalizeGoals(rawGoals: unknown): GoalPlan[] {
                 ? rawPc.cycleDates.filter((d): d is string => typeof d === 'string')
                 : [],
               periodLengthDays:
-                typeof rawPc.periodLengthDays === 'number' && rawPc.periodLengthDays >= 2
+                typeof rawPc.periodLengthDays === 'number' && rawPc.periodLengthDays >= 1
                   ? rawPc.periodLengthDays
                   : 5,
               averageCycleDays:
@@ -378,6 +383,18 @@ export function normalizeGoals(rawGoals: unknown): GoalPlan[] {
               dataMode: rawPc.dataMode === '1month' ? '1month' : '3months',
             }
           : undefined;
+      const scopePlans: Record<string, GoalScopePlan> = {};
+      if (g.scopePlans && typeof g.scopePlans === 'object') {
+        for (const [k, rawScope] of Object.entries(g.scopePlans)) {
+          if (rawScope && typeof rawScope === 'object') {
+            const rs = rawScope as Partial<GoalScopePlan>;
+            scopePlans[k] = {
+              priorities: normalizeTaskEntries(rs.priorities, 'priority', 1),
+              todos: normalizeTaskEntries(rs.todos, 'todo', 3),
+            };
+          }
+        }
+      }
       return {
         id: String(g.id),
         title: typeof g.title === 'string' && g.title.trim() ? g.title : 'Untitled Goal',
@@ -403,10 +420,69 @@ export function normalizeGoals(rawGoals: unknown): GoalPlan[] {
         endMonth: typeof g.endMonth === 'string' ? g.endMonth : undefined,
         ...(phaseConfig ? { phaseConfig } : {}),
         accent: g.accent ?? 'sky',
+        scopePlans,
         steps,
         trailingCarryovers: Array.isArray(g.trailingCarryovers) ? g.trailingCarryovers : [],
         createdAt: typeof g.createdAt === 'number' ? g.createdAt : Date.now(),
         updatedAt: typeof g.updatedAt === 'number' ? g.updatedAt : Date.now(),
+      };
+    });
+}
+
+export function normalizeChecklistTables(rawTables: unknown): ChecklistTableRecord[] {
+  if (!Array.isArray(rawTables)) return [];
+  return rawTables
+    .filter((t): t is ChecklistTableRecord => Boolean(t && typeof t === 'object' && 'id' in t))
+    .map((t) => {
+      const columns: ChecklistColumn[] = Array.isArray(t.columns)
+        ? t.columns
+            .filter((c): c is ChecklistColumn => Boolean(c && typeof c === 'object'))
+            .map((c, idx) => ({
+              id: typeof c.id === 'string' && c.id ? c.id : makeEntryId('col'),
+              label: typeof c.label === 'string' ? c.label : String(idx + 1),
+              ...(typeof c.dateKey === 'string' ? { dateKey: c.dateKey } : {}),
+            }))
+        : [];
+      const rows: ChecklistRow[] = Array.isArray(t.rows)
+        ? t.rows
+            .filter((r): r is ChecklistRow => Boolean(r && typeof r === 'object'))
+            .map((r, idx) => ({
+              id: typeof r.id === 'string' && r.id ? r.id : makeEntryId('row'),
+              label: typeof r.label === 'string' ? r.label : `Item ${idx + 1}`,
+            }))
+        : [];
+      const checks: Record<string, boolean> = {};
+      if (t.checks && typeof t.checks === 'object') {
+        for (const [k, v] of Object.entries(t.checks)) {
+          if (v === true) checks[k] = true;
+        }
+      }
+      const checkTimestamps: Record<string, number> = {};
+      if (t.checkTimestamps && typeof t.checkTimestamps === 'object') {
+        for (const [k, v] of Object.entries(t.checkTimestamps)) {
+          if (typeof v === 'number' && Number.isFinite(v)) checkTimestamps[k] = v;
+        }
+      }
+      return {
+        id: String(t.id),
+        title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Checklist',
+        cadence:
+          t.cadence === 'checklist' ||
+          t.cadence === 'quick' ||
+          t.cadence === 'week' ||
+          t.cadence === 'month' ||
+          t.cadence === 'custom'
+            ? t.cadence
+            : 'quick',
+        accent: t.accent ?? 'sky',
+        ...(typeof t.startDate === 'string' ? { startDate: t.startDate } : {}),
+        ...(typeof t.endDate === 'string' ? { endDate: t.endDate } : {}),
+        columns,
+        rows,
+        checks,
+        checkTimestamps,
+        createdAt: typeof t.createdAt === 'number' ? t.createdAt : Date.now(),
+        updatedAt: typeof t.updatedAt === 'number' ? t.updatedAt : Date.now(),
       };
     });
 }
@@ -480,6 +556,7 @@ function migrateProfile(raw: UserProfile): UserProfile {
     createdAt: raw.createdAt ?? Date.now(),
     studyCards: cards,
     goals: normalizeGoals(raw.goals),
+    checklistTables: normalizeChecklistTables(raw.checklistTables),
     activeDailyPlan: rolled.activeDailyPlan,
     dailyHistory: rolled.dailyHistory,
     gamification: normalizeGamification(raw.gamification),
@@ -508,6 +585,7 @@ export function saveProfiles(profiles: UserProfile[]): void {
       isCloudAccount: Boolean(p.isCloudAccount),
       studyCards: sanitizeStudyCardsForSync(p.studyCards),
       goals: p.goals ?? [],
+      checklistTables: p.checklistTables ?? [],
       activeDailyPlan: p.activeDailyPlan,
       dailyHistory: p.dailyHistory ?? [],
       gamification: p.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -567,6 +645,7 @@ export interface ServerAccountResponse {
     updatedAt: number;
     studyCards: StudySessionCard[];
     goals?: GoalPlan[];
+    checklistTables?: ChecklistTableRecord[];
     activeDailyPlan?: DailyPlanRecord;
     dailyHistory?: DailyPlanRecord[];
     gamification?: GamificationStats;
@@ -580,7 +659,8 @@ export async function registerAccount(
   goals: GoalPlan[] = [],
   gamification: GamificationStats = DEFAULT_GAMIFICATION_STATS,
   activeDailyPlan?: DailyPlanRecord,
-  dailyHistory: DailyPlanRecord[] = []
+  dailyHistory: DailyPlanRecord[] = [],
+  checklistTables: ChecklistTableRecord[] = []
 ): Promise<ServerAccountResponse> {
   const res = await fetch('/api/auth/register', {
     method: 'POST',
@@ -590,6 +670,7 @@ export async function registerAccount(
       password,
       studyCards: sanitizeStudyCardsForSync(studyCards),
       goals,
+      checklistTables,
       activeDailyPlan,
       dailyHistory,
       gamification,
@@ -609,6 +690,7 @@ export async function registerAccount(
       ...data.account,
       studyCards: normalizeStudyCards(data.account.studyCards),
       goals: normalizeGoals(data.account.goals),
+      checklistTables: normalizeChecklistTables(data.account.checklistTables),
       activeDailyPlan: rolled.activeDailyPlan,
       dailyHistory: rolled.dailyHistory,
       gamification: normalizeGamification(data.account.gamification),
@@ -639,6 +721,7 @@ export async function loginAccount(
       ...data.account,
       studyCards: normalizeStudyCards(data.account.studyCards),
       goals: normalizeGoals(data.account.goals),
+      checklistTables: normalizeChecklistTables(data.account.checklistTables),
       activeDailyPlan: rolled.activeDailyPlan,
       dailyHistory: rolled.dailyHistory,
       gamification: normalizeGamification(data.account.gamification),
@@ -661,6 +744,7 @@ export async function fetchCurrentAccount(token: string): Promise<ServerAccountR
       ...data.account,
       studyCards: normalizeStudyCards(data.account.studyCards),
       goals: normalizeGoals(data.account.goals),
+      checklistTables: normalizeChecklistTables(data.account.checklistTables),
       activeDailyPlan: rolled.activeDailyPlan,
       dailyHistory: rolled.dailyHistory,
       gamification: normalizeGamification(data.account.gamification),
@@ -677,7 +761,8 @@ export async function syncAccountCards(
   goals?: GoalPlan[],
   gamification?: GamificationStats,
   activeDailyPlan?: DailyPlanRecord,
-  dailyHistory?: DailyPlanRecord[]
+  dailyHistory?: DailyPlanRecord[],
+  checklistTables?: ChecklistTableRecord[]
 ): Promise<boolean> {
   try {
     const res = await fetch('/api/account/sync', {
@@ -690,6 +775,7 @@ export async function syncAccountCards(
       body: JSON.stringify({
         studyCards: sanitizeStudyCardsForSync(cards),
         ...(goals !== undefined ? { goals } : {}),
+        ...(checklistTables !== undefined ? { checklistTables } : {}),
         ...(gamification !== undefined ? { gamification } : {}),
         ...(activeDailyPlan !== undefined ? { activeDailyPlan } : {}),
         ...(dailyHistory !== undefined ? { dailyHistory } : {}),

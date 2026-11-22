@@ -12,11 +12,14 @@ import {
   Download,
   Edit3,
   Flame,
+  GripVertical,
   HeartPulse,
   History,
+  Layers,
   Plus,
   RotateCcw,
   Save,
+  Send,
   Shield,
   Sparkles,
   Sun,
@@ -33,6 +36,7 @@ import type {
   GoalCarryoverItem,
   GoalPhaseKind,
   GoalPlan,
+  GoalScopePlan,
   GoalStep,
   GoalTaskEntry,
   GoalUnit,
@@ -855,10 +859,11 @@ export function GoalsView({
   const todayIso = toLocalDateKey(Date.now());
   const currentMonthKey = todayIso.slice(0, 7);
 
-  // 'daily' = Today's Auto-Expiring Daily Plan (DEFAULT!); 'creator' = Build Challenge; or a GoalPlan.id
+  // 'daily' = Today's Auto-Expiring Daily Plan; 'creator' = Build Challenge; or GoalPlan.id
   const [activeSelection, setActiveSelection] = useState<'daily' | 'creator' | string>('daily');
   const [showTrophies, setShowTrophies] = useState(false);
   const [showDailyHistory, setShowDailyHistory] = useState(false);
+  const [showGoalImportDrawer, setShowGoalImportDrawer] = useState(false);
   const [selectedImportIds, setSelectedImportIds] = useState<Record<string, boolean>>({});
   const [showSplitter, setShowSplitter] = useState(false);
 
@@ -875,31 +880,52 @@ export function GoalsView({
   const [creatorCadence, setCreatorCadence] = useState<Exclude<GoalCadence, 'daily'>>('week');
   const [accent, setAccent] = useState<StudySessionCard['accent']>('sky');
 
-  // Custom Calendar
+  // Custom Calendar (string-backed total days so user can erase, cut & type freely)
   const [startDate, setStartDate] = useState<string>(() => todayIso);
   const [endDate, setEndDate] = useState<string>(() => todayIso);
+  const [customDaysInput, setCustomDaysInput] = useState<string>('1');
 
   // Week
-  const [weekCount, setWeekCount] = useState<number>(1);
+  const [weekCountInput, setWeekCountInput] = useState<string>('1');
+  const weekCount = useMemo(() => {
+    const parsed = Number.parseInt(weekCountInput, 10);
+    return Number.isFinite(parsed) ? Math.max(1, Math.min(52, parsed)) : 1;
+  }, [weekCountInput]);
   const [weekTrackBy, setWeekTrackBy] = useState<'days' | 'weeks'>('days');
 
   // Month (Real Calendar Months + Optional Exact # of Days)
   const [monthUseExactDays, setMonthUseExactDays] = useState(false);
   const [monthStart, setMonthStart] = useState<string>(() => currentMonthKey);
   const [monthEnd, setMonthEnd] = useState<string>(() => currentMonthKey);
-  const [monthExactDays, setMonthExactDays] = useState<number>(30);
+  const [monthExactDaysInput, setMonthExactDaysInput] = useState<string>('30');
+  const monthExactDays = useMemo(() => {
+    const parsed = Number.parseInt(monthExactDaysInput, 10);
+    return Number.isFinite(parsed) ? Math.max(1, Math.min(365, parsed)) : 30;
+  }, [monthExactDaysInput]);
 
-  // Phase
+  // Phase (string-backed inputs so typing/deleting/cutting works naturally!)
   const [phaseDataMode, setPhaseDataMode] = useState<'3months' | '1month'>('3months');
   const [phaseDate1, setPhaseDate1] = useState<string>(() => addDaysToIso(todayIso, -64));
   const [phaseDate2, setPhaseDate2] = useState<string>(() => addDaysToIso(todayIso, -35));
   const [phaseDate3, setPhaseDate3] = useState<string>(() => addDaysToIso(todayIso, -6));
-  const [phaseManualCycleDays, setPhaseManualCycleDays] = useState<number>(28);
-  const [phasePeriodDays, setPhasePeriodDays] = useState<number>(5);
+  const [phaseManualCycleDaysInput, setPhaseManualCycleDaysInput] = useState<string>('28');
+  const [phasePeriodDaysInput, setPhasePeriodDaysInput] = useState<string>('5');
+  const phaseManualCycleDays = useMemo(() => {
+    const parsed = Number.parseInt(phaseManualCycleDaysInput, 10);
+    return Number.isFinite(parsed) ? Math.max(18, Math.min(45, parsed)) : 28;
+  }, [phaseManualCycleDaysInput]);
+  const phasePeriodDays = useMemo(() => {
+    const parsed = Number.parseInt(phasePeriodDaysInput, 10);
+    return Number.isFinite(parsed) ? Math.max(1, Math.min(14, parsed)) : 5;
+  }, [phasePeriodDaysInput]);
   const [phaseFilter, setPhaseFilter] = useState<'all' | GoalPhaseKind>('all');
 
-  // Month tab filter & Expanded Bars in Challenge View
+  // Week / Month tab filters, Scope Master Plan, Drag-and-Drop & Expanded Bars
+  const [selectedWeekTab, setSelectedWeekTab] = useState<'all' | number>('all');
   const [selectedMonthTab, setSelectedMonthTab] = useState<string>('all');
+  const [showScopePlan, setShowScopePlan] = useState<boolean>(true);
+  const [dragOverStep, setDragOverStep] = useState<number | null>(null);
+  const [assignDayTargets, setAssignDayTargets] = useState<Record<string, number>>({});
   const [expandedSteps, setExpandedSteps] = useState<Record<string, boolean>>({});
 
   // Smart Splitter
@@ -911,7 +937,9 @@ export function GoalsView({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const activeGoal = useMemo(() => {
-    if (activeSelection === 'daily' || activeSelection === 'creator') return null;
+    if (activeSelection === 'daily' || activeSelection === 'creator') {
+      return null;
+    }
     return goals.find((g) => g.id === activeSelection) ?? null;
   }, [activeSelection, goals]);
 
@@ -953,26 +981,31 @@ export function GoalsView({
     isRescue: boolean,
     updatedGoalSnapshot?: GoalPlan
   ) => {
-    onUpdateGamification((prev) => {
-      const result = applyGoalCompletionReward(prev, baseXp, isRescue, updatedGoalSnapshot);
-      if (result.leveledUpTo) {
-        playCueSound('goal_levelup');
-        pushFloating(`LEVEL ${result.leveledUpTo} UNLOCKED!`, 'gold');
-        showNotice(`Leveled up to Level ${result.leveledUpTo}!`);
-      } else {
-        playCueSound('goal_tick');
-        pushFloating(
-          result.nextStats.combo >= 2
-            ? `+${result.earnedXp} XP · ${result.nextStats.combo}x Combo!`
-            : `+${result.earnedXp} XP`,
-          isRescue ? 'gold' : 'cyan'
-        );
-      }
-      if (result.earnedShield) {
-        showNotice('3-streak reached — earned +1 Momentum Shield!');
-      }
-      return result.nextStats;
-    });
+    const result = applyGoalCompletionReward(
+      gamification,
+      baseXp,
+      isRescue,
+      updatedGoalSnapshot
+    );
+    onUpdateGamification((prev) =>
+      applyGoalCompletionReward(prev, baseXp, isRescue, updatedGoalSnapshot).nextStats
+    );
+    if (result.leveledUpTo) {
+      playCueSound('goal_levelup');
+      pushFloating(`LEVEL ${result.leveledUpTo} UNLOCKED!`, 'gold');
+      showNotice(`Leveled up to Level ${result.leveledUpTo}!`);
+    } else {
+      playCueSound('goal_tick');
+      pushFloating(
+        result.nextStats.combo >= 2
+          ? `+${result.earnedXp} XP · ${result.nextStats.combo}x Combo!`
+          : `+${result.earnedXp} XP`,
+        isRescue ? 'gold' : 'cyan'
+      );
+    }
+    if (result.earnedShield) {
+      showNotice('3-streak reached — earned +1 Momentum Shield!');
+    }
   };
 
   // Unfinished tasks from Past Daily History
@@ -1187,6 +1220,87 @@ export function GoalsView({
     pushFloating(`Imported ${itemsToImport.length} task${itemsToImport.length === 1 ? '' : 's'}!`, 'cyan');
   };
 
+  const handleImportStepToDaily = (goal: GoalPlan, step: GoalStep) => {
+    const savedPriorities = (step.priorities ?? []).filter((p) => p.text.trim());
+    const savedTodos = (step.todos ?? []).filter((t) => t.text.trim());
+    const allSaved = [...savedPriorities, ...savedTodos];
+    if (allSaved.length === 0) {
+      showNotice(`Bar #${step.stepNumber} has no saved tasks to import yet.`);
+      return;
+    }
+
+    const existingKeys = new Set(
+      [...activeDailyPlan.priorities, ...activeDailyPlan.todos]
+        .filter((e) => e.text.trim())
+        .map((e) => `${e.kind}:${e.text.trim().toLowerCase()}`)
+    );
+
+    const pendingToImport: GoalTaskEntry[] = [];
+    for (const entry of allSaved) {
+      const dedupeKey = `${entry.kind}:${entry.text.trim().toLowerCase()}`;
+      if (existingKeys.has(dedupeKey)) continue;
+      existingKeys.add(dedupeKey);
+      pendingToImport.push(entry);
+    }
+
+    if (pendingToImport.length === 0) {
+      showNotice(`Tasks from "${goal.title}" #${step.stepNumber} are already in Today's Daily Plan.`);
+      return;
+    }
+
+    onUpdateDailyPlan((prev) => {
+      const prevKeys = new Set(
+        [...prev.priorities, ...prev.todos]
+          .filter((e) => e.text.trim())
+          .map((e) => `${e.kind}:${e.text.trim().toLowerCase()}`)
+      );
+
+      const nextPriorities = [...prev.priorities];
+      const nextTodos = [...prev.todos];
+
+      for (const entry of pendingToImport) {
+        const dedupeKey = `${entry.kind}:${entry.text.trim().toLowerCase()}`;
+        if (prevKeys.has(dedupeKey)) continue;
+        prevKeys.add(dedupeKey);
+
+        const cloned: GoalTaskEntry = {
+          id: makeId(entry.kind === 'priority' ? 'pri' : 'todo'),
+          kind: entry.kind,
+          text: entry.text.trim(),
+          status: entry.status === 'done' ? 'done' : 'pending',
+          ...(entry.status === 'done' ? { completedAt: Date.now() } : {}),
+          deadline:
+            entry.kind === 'priority' && entry.deadline
+              ? computeDueTimestampForDeadline(entry.deadline, todayIso)
+              : undefined,
+        };
+
+        if (entry.kind === 'priority') {
+          const emptyIdx = nextPriorities.findIndex((p) => !p.text.trim());
+          if (emptyIdx !== -1) nextPriorities[emptyIdx] = cloned;
+          else nextPriorities.push(cloned);
+        } else {
+          const emptyIdx = nextTodos.findIndex((t) => !t.text.trim());
+          if (emptyIdx !== -1) nextTodos[emptyIdx] = cloned;
+          else nextTodos.push(cloned);
+        }
+      }
+
+      return {
+        ...prev,
+        priorities: nextPriorities,
+        todos: nextTodos,
+        updatedAt: Date.now(),
+      };
+    });
+
+    playCueSound('goal_tick');
+    pushFloating(`Imported ${pendingToImport.length} to Today!`, 'cyan');
+    showNotice(
+      `Imported ${pendingToImport.length} task${pendingToImport.length === 1 ? '' : 's'} from "${goal.title}" (#${step.stepNumber}) into Today's Daily Plan.`
+    );
+  };
+
   // ============================================================================
   // Multi-Day Challenge Handlers (Custom / Week / Month / Phase)
   // ============================================================================
@@ -1239,7 +1353,7 @@ export function GoalsView({
       creatorCadence === 'phase'
         ? {
             cycleDates: computedPhasePreview.sortedDates,
-            periodLengthDays: Math.max(2, Math.min(10, phasePeriodDays || 5)),
+            periodLengthDays: Math.max(1, Math.min(14, phasePeriodDays || 5)),
             averageCycleDays: computedPhasePreview.avgDays,
             dataMode: phaseDataMode,
           }
@@ -1291,6 +1405,7 @@ export function GoalsView({
 
     onUpdateGoals((prev) => [newGoal, ...prev]);
     setActiveSelection(newGoal.id);
+    setSelectedWeekTab('all');
     setSelectedMonthTab('all');
     setPhaseFilter('all');
     setExpandedSteps({ [`${newGoal.id}:1`]: true });
@@ -1472,23 +1587,27 @@ export function GoalsView({
       };
     });
 
+    const shieldCushioned = gamification.shields > 0 && gamification.combo > 0;
     onUpdateGamification((prev) => {
       if (prev.shields > 0 && prev.combo > 0) {
-        const preservedCombo = Math.floor(prev.combo / 2);
-        showNotice(
-          nextStep
-            ? `Shield cushioned combo! "${carryoverItem.text}" placed below #${nextStep.stepNumber}.`
-            : `Shield cushioned combo! "${carryoverItem.text}" moved to catch-up below #${step.stepNumber}.`
-        );
-        return { ...prev, shields: prev.shields - 1, combo: preservedCombo };
+        return { ...prev, shields: prev.shields - 1, combo: Math.floor(prev.combo / 2) };
       }
+      return { ...prev, combo: 0 };
+    });
+
+    if (shieldCushioned) {
+      showNotice(
+        nextStep
+          ? `Shield cushioned combo! "${carryoverItem.text}" placed below #${nextStep.stepNumber}.`
+          : `Shield cushioned combo! "${carryoverItem.text}" moved to catch-up below #${step.stepNumber}.`
+      );
+    } else {
       showNotice(
         nextStep
           ? `"${carryoverItem.text}" placed below #${nextStep.stepNumber} for catch-up.`
           : `"${carryoverItem.text}" placed into catch-up below #${step.stepNumber}.`
       );
-      return { ...prev, combo: 0 };
-    });
+    }
 
     playCueSound('goal_carryover');
     pushFloating(
@@ -1675,6 +1794,64 @@ export function GoalsView({
     }));
   };
 
+  const handleAddExtraPhaseDay = (goal: GoalPlan, phase: GoalPhaseKind) => {
+    if (goal.cadence !== 'phase') return;
+    let lastPhaseIdx = -1;
+    for (let i = 0; i < goal.steps.length; i++) {
+      if (goal.steps[i].phase === phase) {
+        lastPhaseIdx = i;
+      }
+    }
+    const insertIdx = lastPhaseIdx !== -1 ? lastPhaseIdx + 1 : goal.steps.length;
+    const insertStepNum = insertIdx + 1;
+
+    updateGoalById(goal.id, (g) => {
+      const inserted = createFreshStep(insertStepNum, { phase });
+      const rawSteps = [
+        ...g.steps.slice(0, insertIdx),
+        inserted,
+        ...g.steps.slice(insertIdx),
+      ];
+      const renumberedSteps = rawSteps.map((s, idx) => ({
+        ...s,
+        stepNumber: idx + 1,
+        carryovers: s.carryovers.map((co) => ({
+          ...co,
+          originStepNumber:
+            co.originStepNumber >= insertStepNum
+              ? co.originStepNumber + 1
+              : co.originStepNumber,
+        })),
+      }));
+      const nextPeriodDays =
+        phase === 'menstrual'
+          ? renumberedSteps.filter((s) => s.phase === 'menstrual').length
+          : g.phaseConfig?.periodLengthDays ?? 5;
+
+      return {
+        ...g,
+        totalSteps: renumberedSteps.length,
+        ...(g.phaseConfig
+          ? {
+              phaseConfig: {
+                ...g.phaseConfig,
+                periodLengthDays: nextPeriodDays,
+                averageCycleDays: renumberedSteps.length,
+              },
+            }
+          : {}),
+        steps: renumberedSteps,
+      };
+    });
+
+    setExpandedSteps((prev) => ({
+      ...prev,
+      [`${goal.id}:${insertStepNum}`]: true,
+    }));
+    playCueSound('goal_tick');
+    showNotice(`Added +1 day to ${PHASE_META[phase].label} Phase (Day #${insertStepNum}).`);
+  };
+
   const handleSmartSplit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeGoal) return;
@@ -1716,6 +1893,318 @@ export function GoalsView({
     setSplitTotalValue('');
     playCueSound('goal_tick');
     pushFloating('Filled Priority #1 Across Bars!', 'cyan');
+  };
+
+  // ============================================================================
+  // Scope-Level Master Priorities & To-Do List + Drag/Place Into Days
+  // ============================================================================
+
+  const getScopePlan = (goal: GoalPlan, scopeKey: string): GoalScopePlan => {
+    const existing = goal.scopePlans?.[scopeKey];
+    const priorities =
+      existing && existing.priorities.length > 0
+        ? existing.priorities
+        : [makeEmptyEntry('priority')];
+    const todos =
+      existing && existing.todos.length >= 3
+        ? existing.todos
+        : [
+            ...(existing?.todos ?? []),
+            ...Array.from(
+              { length: Math.max(0, 3 - (existing?.todos.length ?? 0)) },
+              () => makeEmptyEntry('todo')
+            ),
+          ];
+    return { priorities, todos };
+  };
+
+  const handleScopeSaveEntry = (
+    goal: GoalPlan,
+    scopeKey: string,
+    kind: 'priority' | 'todo',
+    entryId: string,
+    text: string,
+    deadline?: PriorityDeadline
+  ) => {
+    updateGoalById(goal.id, (g) => {
+      const current = getScopePlan(g, scopeKey);
+      const list = kind === 'priority' ? current.priorities : current.todos;
+      const updatedList = list.map((item) =>
+        item.id === entryId
+          ? {
+              ...item,
+              text,
+              status: item.status === 'empty' ? ('pending' as const) : item.status,
+              ...(kind === 'priority' ? { deadline } : {}),
+            }
+          : item
+      );
+      return {
+        ...g,
+        scopePlans: {
+          ...(g.scopePlans ?? {}),
+          [scopeKey]: {
+            priorities: kind === 'priority' ? updatedList : current.priorities,
+            todos: kind === 'todo' ? updatedList : current.todos,
+          },
+        },
+      };
+    });
+  };
+
+  const handleScopeDeleteEntry = (
+    goal: GoalPlan,
+    scopeKey: string,
+    kind: 'priority' | 'todo',
+    entryId: string
+  ) => {
+    updateGoalById(goal.id, (g) => {
+      const current = getScopePlan(g, scopeKey);
+      const minSlots = kind === 'priority' ? 1 : 3;
+      const raw = kind === 'priority' ? current.priorities : current.todos;
+      const filtered = raw.filter((item) => item.id !== entryId);
+      while (filtered.length < minSlots) {
+        filtered.push(makeEmptyEntry(kind));
+      }
+      return {
+        ...g,
+        scopePlans: {
+          ...(g.scopePlans ?? {}),
+          [scopeKey]: {
+            priorities: kind === 'priority' ? filtered : current.priorities,
+            todos: kind === 'todo' ? filtered : current.todos,
+          },
+        },
+      };
+    });
+  };
+
+  const handleScopeAddSlot = (
+    goal: GoalPlan,
+    scopeKey: string,
+    kind: 'priority' | 'todo'
+  ) => {
+    updateGoalById(goal.id, (g) => {
+      const current = getScopePlan(g, scopeKey);
+      const list =
+        kind === 'priority'
+          ? [...current.priorities, makeEmptyEntry('priority')]
+          : [...current.todos, makeEmptyEntry('todo')];
+      return {
+        ...g,
+        scopePlans: {
+          ...(g.scopePlans ?? {}),
+          [scopeKey]: {
+            priorities: kind === 'priority' ? list : current.priorities,
+            todos: kind === 'todo' ? list : current.todos,
+          },
+        },
+      };
+    });
+  };
+
+  const handleScopeTickEntry = (
+    goal: GoalPlan,
+    scopeKey: string,
+    kind: 'priority' | 'todo',
+    entryId: string
+  ) => {
+    const current = getScopePlan(goal, scopeKey);
+    const list = kind === 'priority' ? current.priorities : current.todos;
+    const target = list.find((e) => e.id === entryId);
+    if (!target || !target.text.trim()) return;
+    const wasDone = target.status === 'done';
+
+    const updatedList = list.map((item) =>
+      item.id === entryId
+        ? {
+            ...item,
+            status: wasDone ? ('pending' as const) : ('done' as const),
+            completedAt: wasDone ? undefined : Date.now(),
+            missedAt: undefined,
+          }
+        : item
+    );
+
+    const updatedGoal: GoalPlan = {
+      ...goal,
+      scopePlans: {
+        ...(goal.scopePlans ?? {}),
+        [scopeKey]: {
+          priorities: kind === 'priority' ? updatedList : current.priorities,
+          todos: kind === 'todo' ? updatedList : current.todos,
+        },
+      },
+    };
+
+    updateGoalById(goal.id, () => updatedGoal);
+    if (!wasDone) {
+      awardCompletionRewards(kind === 'priority' ? 55 : 35, false, updatedGoal);
+    }
+  };
+
+  const handleScopeMissEntry = (
+    goal: GoalPlan,
+    scopeKey: string,
+    kind: 'priority' | 'todo',
+    entryId: string
+  ) => {
+    updateGoalById(goal.id, (g) => {
+      const current = getScopePlan(g, scopeKey);
+      const list = kind === 'priority' ? current.priorities : current.todos;
+      const nextList = list.map((item) =>
+        item.id === entryId ? { ...item, status: 'missed' as const, missedAt: Date.now() } : item
+      );
+      return {
+        ...g,
+        scopePlans: {
+          ...(g.scopePlans ?? {}),
+          [scopeKey]: {
+            priorities: kind === 'priority' ? nextList : current.priorities,
+            todos: kind === 'todo' ? nextList : current.todos,
+          },
+        },
+      };
+    });
+    playCueSound('goal_carryover');
+  };
+
+  const handleScopeRestoreEntry = (
+    goal: GoalPlan,
+    scopeKey: string,
+    kind: 'priority' | 'todo',
+    entryId: string
+  ) => {
+    updateGoalById(goal.id, (g) => {
+      const current = getScopePlan(g, scopeKey);
+      const list = kind === 'priority' ? current.priorities : current.todos;
+      const nextList = list.map((item) =>
+        item.id === entryId
+          ? {
+              ...item,
+              status: item.text.trim() ? ('pending' as const) : ('empty' as const),
+              missedAt: undefined,
+            }
+          : item
+      );
+      return {
+        ...g,
+        scopePlans: {
+          ...(g.scopePlans ?? {}),
+          [scopeKey]: {
+            priorities: kind === 'priority' ? nextList : current.priorities,
+            todos: kind === 'todo' ? nextList : current.todos,
+          },
+        },
+      };
+    });
+  };
+
+  const handleScopeReschedulePriority = (
+    goal: GoalPlan,
+    scopeKey: string,
+    entryId: string,
+    nextDeadline: PriorityDeadline
+  ) => {
+    updateGoalById(goal.id, (g) => {
+      const current = getScopePlan(g, scopeKey);
+      return {
+        ...g,
+        scopePlans: {
+          ...(g.scopePlans ?? {}),
+          [scopeKey]: {
+            ...current,
+            priorities: current.priorities.map((item) =>
+              item.id === entryId ? { ...item, deadline: nextDeadline } : item
+            ),
+          },
+        },
+      };
+    });
+  };
+
+  const handlePlaceScopeTaskIntoStep = (
+    goal: GoalPlan,
+    entryData: {
+      kind: 'priority' | 'todo';
+      text: string;
+      deadline?: PriorityDeadline;
+    },
+    targetStepNumber: number
+  ) => {
+    const cleanText = entryData.text.trim();
+    if (!cleanText) return;
+    const targetStep = goal.steps.find((s) => s.stepNumber === targetStepNumber);
+    if (!targetStep) return;
+
+    const existingList =
+      entryData.kind === 'priority'
+        ? targetStep.priorities ?? [makeEmptyEntry('priority')]
+        : targetStep.todos ?? [
+            makeEmptyEntry('todo'),
+            makeEmptyEntry('todo'),
+            makeEmptyEntry('todo'),
+          ];
+    const alreadyExists = existingList.some(
+      (item) => item.text.trim().toLowerCase() === cleanText.toLowerCase()
+    );
+
+    if (alreadyExists) {
+      setExpandedSteps((prev) => ({
+        ...prev,
+        [`${goal.id}:${targetStepNumber}`]: true,
+      }));
+      showNotice(`"${cleanText}" is already planned in #${targetStepNumber}.`);
+      return;
+    }
+
+    const cloned: GoalTaskEntry = {
+      id: makeId(entryData.kind === 'priority' ? 'pri' : 'todo'),
+      kind: entryData.kind,
+      text: cleanText,
+      status: 'pending',
+      deadline:
+        entryData.kind === 'priority' && entryData.deadline
+          ? computeDueTimestampForDeadline(
+              entryData.deadline,
+              targetStep.dateLabel ?? todayIso
+            )
+          : undefined,
+    };
+
+    updateGoalById(goal.id, (g) => ({
+      ...g,
+      steps: g.steps.map((s) => {
+        if (s.stepNumber !== targetStepNumber) return s;
+        const baseList =
+          entryData.kind === 'priority'
+            ? [...(s.priorities ?? [makeEmptyEntry('priority')])]
+            : [
+                ...(s.todos ?? [
+                  makeEmptyEntry('todo'),
+                  makeEmptyEntry('todo'),
+                  makeEmptyEntry('todo'),
+                ]),
+              ];
+        const emptyIdx = baseList.findIndex((item) => !item.text.trim());
+        if (emptyIdx !== -1) baseList[emptyIdx] = cloned;
+        else baseList.push(cloned);
+
+        return {
+          ...s,
+          priorities: entryData.kind === 'priority' ? baseList : s.priorities,
+          todos: entryData.kind === 'todo' ? baseList : s.todos,
+        };
+      }),
+    }));
+
+    setExpandedSteps((prev) => ({
+      ...prev,
+      [`${goal.id}:${targetStepNumber}`]: true,
+    }));
+    playCueSound('goal_tick');
+    pushFloating(`Placed in #${targetStepNumber}!`, 'cyan');
+    showNotice(`Placed "${cleanText}" into #${targetStepNumber}.`);
   };
 
   const goalStats = useMemo(() => {
@@ -1766,6 +2255,25 @@ export function GoalsView({
     [activeGoal, todayIso]
   );
 
+  const weekTabsForActiveGoal = useMemo(() => {
+    if (!activeGoal || activeGoal.cadence !== 'week' || activeGoal.unit === 'weeks') {
+      return [];
+    }
+    const totalWeeks = Math.ceil(activeGoal.steps.length / 7);
+    if (totalWeeks <= 1) return [];
+    return Array.from({ length: totalWeeks }, (_, idx) => {
+      const weekNum = idx + 1;
+      const startStep = idx * 7 + 1;
+      const endStep = Math.min(activeGoal.steps.length, weekNum * 7);
+      return {
+        weekNum,
+        startStep,
+        endStep,
+        count: endStep - startStep + 1,
+      };
+    });
+  }, [activeGoal]);
+
   const monthTabsForActiveGoal = useMemo(() => {
     if (!activeGoal) return [];
     const map = new Map<string, number>();
@@ -1787,6 +2295,11 @@ export function GoalsView({
     if (activeGoal.cadence === 'phase' && phaseFilter !== 'all') {
       list = list.filter((s) => s.phase === phaseFilter);
     }
+    if (weekTabsForActiveGoal.length > 0 && selectedWeekTab !== 'all') {
+      const start = (selectedWeekTab - 1) * 7 + 1;
+      const end = selectedWeekTab * 7;
+      list = list.filter((s) => s.stepNumber >= start && s.stepNumber <= end);
+    }
     if (
       monthTabsForActiveGoal.length > 1 &&
       selectedMonthTab !== 'all'
@@ -1794,7 +2307,75 @@ export function GoalsView({
       list = list.filter((s) => s.monthKey === selectedMonthTab);
     }
     return list;
-  }, [activeGoal, monthTabsForActiveGoal.length, phaseFilter, selectedMonthTab]);
+  }, [
+    activeGoal,
+    monthTabsForActiveGoal.length,
+    phaseFilter,
+    selectedMonthTab,
+    selectedWeekTab,
+    weekTabsForActiveGoal.length,
+  ]);
+
+  const activeScopeInfo = useMemo(() => {
+    if (!activeGoal) {
+      return { scopeKey: 'all', label: 'Goal Plan' };
+    }
+    if (activeGoal.cadence === 'phase' && phaseFilter !== 'all') {
+      return {
+        scopeKey: `phase:${phaseFilter}`,
+        label: `${PHASE_META[phaseFilter].label} Phase`,
+      };
+    }
+    if (weekTabsForActiveGoal.length > 0 && selectedWeekTab !== 'all') {
+      return {
+        scopeKey: `week:${selectedWeekTab}`,
+        label: `Week ${selectedWeekTab}`,
+      };
+    }
+    if (monthTabsForActiveGoal.length > 1 && selectedMonthTab !== 'all') {
+      return {
+        scopeKey: `month:${selectedMonthTab}`,
+        label: formatMonthLabel(selectedMonthTab),
+      };
+    }
+    const label =
+      activeGoal.cadence === 'phase'
+        ? 'All Phases Cycle'
+        : activeGoal.cadence === 'week'
+          ? weekTabsForActiveGoal.length > 1
+            ? `All ${weekTabsForActiveGoal.length} Weeks`
+            : 'Whole Week Plan'
+          : activeGoal.cadence === 'month'
+            ? monthTabsForActiveGoal.length > 1
+              ? 'All Months'
+              : monthTabsForActiveGoal[0]?.label ?? 'Monthly Plan'
+            : 'Entire Challenge';
+    return { scopeKey: 'all', label };
+  }, [
+    activeGoal,
+    monthTabsForActiveGoal,
+    phaseFilter,
+    selectedMonthTab,
+    selectedWeekTab,
+    weekTabsForActiveGoal.length,
+  ]);
+
+  const activeScopePlan = useMemo(
+    () =>
+      activeGoal
+        ? getScopePlan(activeGoal, activeScopeInfo.scopeKey)
+        : { priorities: [], todos: [] },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeGoal, activeScopeInfo.scopeKey]
+  );
+
+  const activeScopeSavedItems = useMemo(
+    () => [
+      ...activeScopePlan.priorities.filter((p) => p.text.trim()),
+      ...activeScopePlan.todos.filter((t) => t.text.trim()),
+    ],
+    [activeScopePlan]
+  );
 
   // Daily plan progress stats
   const dailySavedCount = useMemo(() => {
@@ -2047,6 +2628,7 @@ export function GoalsView({
                 key={g.id}
                 onClick={() => {
                   setActiveSelection(g.id);
+                  setSelectedWeekTab('all');
                   setSelectedMonthTab('all');
                   setPhaseFilter('all');
                   setExpandedSteps((prev) => ({
@@ -2060,6 +2642,9 @@ export function GoalsView({
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
                     setActiveSelection(g.id);
+                    setSelectedWeekTab('all');
+                    setSelectedMonthTab('all');
+                    setPhaseFilter('all');
                   }
                 }}
                 className={`group flex cursor-pointer flex-col justify-between rounded-xl border p-3.5 text-left transition-all ${
@@ -2139,6 +2724,21 @@ export function GoalsView({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              {goals.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowGoalImportDrawer((v) => !v)}
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    showGoalImportDrawer
+                      ? 'bio-glow-chip'
+                      : 'border-cyan-200/20 bg-cyan-400/[0.06] text-cyan-100 hover:border-cyan-300/45'
+                  }`}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Import from Goals / Phases
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setShowDailyHistory((v) => !v)}
@@ -2287,6 +2887,101 @@ export function GoalsView({
                   Import Selected
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Import From Goals & Monthly Phases Drawer */}
+          {showGoalImportDrawer && (
+            <div className="space-y-3 rounded-xl border border-cyan-300/25 bg-[#04111b]/75 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-cyan-200">
+                  Import Tasks from Active Goals &amp; Cycle Phases
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowGoalImportDrawer(false)}
+                  className="cursor-pointer text-xs text-slate-400 hover:text-slate-100"
+                >
+                  Close
+                </button>
+              </div>
+
+              {(() => {
+                const importableRows = goals.flatMap((g) => {
+                  const prog = computeChallengeDayProgress(g, todayIso);
+                  return g.steps
+                    .filter((s) => {
+                      const hasSaved =
+                        (s.priorities ?? []).some((p) => p.text.trim()) ||
+                        (s.todos ?? []).some((t) => t.text.trim());
+                      return hasSaved;
+                    })
+                    .map((s) => ({
+                      goal: g,
+                      step: s,
+                      isTodayMatch: s.stepNumber === prog.currentStepNumber,
+                    }));
+                });
+
+                if (importableRows.length === 0) {
+                  return (
+                    <p className="text-xs text-slate-400">
+                      Save some Priorities or To-Dos inside any Goal or Monthly Phase day first, and they will appear here to import straight into Today&apos;s Daily Plan!
+                    </p>
+                  );
+                }
+
+                // Sort today's steps to the top
+                importableRows.sort((a, b) => Number(b.isTodayMatch) - Number(a.isTodayMatch));
+
+                return (
+                  <div className="max-h-72 space-y-2.5 overflow-y-auto quiet-scroll">
+                    {importableRows.map(({ goal, step, isTodayMatch }) => {
+                      const items = [
+                        ...(step.priorities ?? []).filter((p) => p.text.trim()),
+                        ...(step.todos ?? []).filter((t) => t.text.trim()),
+                      ];
+                      const phaseLabel = step.phase ? PHASE_META[step.phase].label : null;
+                      return (
+                        <div
+                          key={`${goal.id}-${step.stepNumber}`}
+                          className="rounded-xl border border-cyan-200/15 bg-slate-950/60 p-3"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <span className="font-semibold text-slate-100">{goal.title}</span>
+                              <span className="font-mono-tabular rounded bg-cyan-400/15 px-1.5 py-0.5 text-[11px] text-cyan-100">
+                                #{step.stepNumber}
+                              </span>
+                              {phaseLabel && (
+                                <span className="text-amber-200">{phaseLabel} Phase</span>
+                              )}
+                              {isTodayMatch && (
+                                <span className="rounded bg-amber-400/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-100">
+                                  Today&apos;s Step
+                                </span>
+                              )}
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => handleImportStepToDaily(goal, step)}
+                              className="bio-btn-primary flex cursor-pointer items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold"
+                            >
+                              <Download className="h-3 w-3" />
+                              Import ({items.length})
+                            </button>
+                          </div>
+
+                          <p className="mt-1.5 truncate text-[11px] text-slate-300/80">
+                            {items.map((i) => i.text).join(' · ')}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -2527,7 +3222,9 @@ export function GoalsView({
                       onChange={(e) => {
                         const nextStart = e.target.value;
                         setStartDate(nextStart);
+                        const nextEnd = nextStart > endDate ? nextStart : endDate;
                         if (nextStart > endDate) setEndDate(nextStart);
+                        setCustomDaysInput(String(daysBetweenInclusive(nextStart, nextEnd)));
                       }}
                       className="bio-input rounded-lg px-3 py-2 text-xs text-slate-100"
                     />
@@ -2540,7 +3237,11 @@ export function GoalsView({
                       type="date"
                       value={endDate}
                       min={startDate}
-                      onChange={(e) => setEndDate(e.target.value)}
+                      onChange={(e) => {
+                        const nextEnd = e.target.value;
+                        setEndDate(nextEnd);
+                        setCustomDaysInput(String(daysBetweenInclusive(startDate, nextEnd)));
+                      }}
                       className="bio-input rounded-lg px-3 py-2 text-xs text-slate-100"
                     />
                   </div>
@@ -2549,13 +3250,20 @@ export function GoalsView({
                       Total Days
                     </label>
                     <input
-                      type="number"
-                      min={1}
-                      max={365}
-                      value={daysBetweenInclusive(startDate, endDate)}
+                      type="text"
+                      inputMode="numeric"
+                      value={customDaysInput}
                       onChange={(e) => {
-                        const n = Math.max(1, Math.min(365, Number(e.target.value) || 1));
-                        setEndDate(addDaysToIso(startDate, n - 1));
+                        const cleaned = e.target.value.replace(/[^0-9]/g, '');
+                        setCustomDaysInput(cleaned);
+                        const parsed = Number.parseInt(cleaned, 10);
+                        if (Number.isFinite(parsed) && parsed >= 1) {
+                          const clamped = Math.min(365, parsed);
+                          setEndDate(addDaysToIso(startDate, clamped - 1));
+                        }
+                      }}
+                      onBlur={() => {
+                        setCustomDaysInput(String(daysBetweenInclusive(startDate, endDate)));
                       }}
                       className="bio-input font-mono-tabular w-24 rounded-lg px-3 py-2 text-xs text-slate-100"
                     />
@@ -2573,7 +3281,7 @@ export function GoalsView({
                           <button
                             key={w}
                             type="button"
-                            onClick={() => setWeekCount(w)}
+                            onClick={() => setWeekCountInput(String(w))}
                             className={`cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                               weekCount === w
                                 ? 'bio-glow-chip'
@@ -2592,13 +3300,13 @@ export function GoalsView({
                           Number of Weeks
                         </label>
                         <input
-                          type="number"
-                          min={1}
-                          max={52}
-                          value={weekCount}
+                          type="text"
+                          inputMode="numeric"
+                          value={weekCountInput}
                           onChange={(e) =>
-                            setWeekCount(Math.max(1, Math.min(52, Number(e.target.value) || 1)))
+                            setWeekCountInput(e.target.value.replace(/[^0-9]/g, ''))
                           }
+                          onBlur={() => setWeekCountInput(String(weekCount))}
                           className="bio-input font-mono-tabular w-20 rounded-lg px-2.5 py-1.5 text-center text-xs"
                         />
                       </div>
@@ -2747,15 +3455,13 @@ export function GoalsView({
                     <div className="flex flex-wrap items-center gap-3">
                       <label className="text-xs text-slate-300">Exact number of days:</label>
                       <input
-                        type="number"
-                        min={1}
-                        max={365}
-                        value={monthExactDays}
+                        type="text"
+                        inputMode="numeric"
+                        value={monthExactDaysInput}
                         onChange={(e) =>
-                          setMonthExactDays(
-                            Math.max(1, Math.min(365, Number(e.target.value) || 1))
-                          )
+                          setMonthExactDaysInput(e.target.value.replace(/[^0-9]/g, ''))
                         }
+                        onBlur={() => setMonthExactDaysInput(String(monthExactDays))}
                         className="bio-input font-mono-tabular w-24 rounded-lg px-3 py-1.5 text-center text-xs"
                       />
                     </div>
@@ -2841,15 +3547,14 @@ export function GoalsView({
                           Period Length (days)
                         </label>
                         <input
-                          type="number"
-                          min={2}
-                          max={10}
-                          value={phasePeriodDays}
+                          type="text"
+                          inputMode="numeric"
+                          value={phasePeriodDaysInput}
                           onChange={(e) =>
-                            setPhasePeriodDays(
-                              Math.max(2, Math.min(10, Number(e.target.value) || 5))
-                            )
+                            setPhasePeriodDaysInput(e.target.value.replace(/[^0-9]/g, ''))
                           }
+                          onBlur={() => setPhasePeriodDaysInput(String(phasePeriodDays))}
+                          placeholder="e.g. 5 or 6"
                           className="bio-input font-mono-tabular w-full rounded-lg px-2.5 py-2 text-xs text-slate-100"
                         />
                       </div>
@@ -2872,15 +3577,16 @@ export function GoalsView({
                           Typical Cycle Days
                         </label>
                         <input
-                          type="number"
-                          min={18}
-                          max={45}
-                          value={phaseManualCycleDays}
+                          type="text"
+                          inputMode="numeric"
+                          value={phaseManualCycleDaysInput}
                           onChange={(e) =>
-                            setPhaseManualCycleDays(
-                              Math.max(18, Math.min(45, Number(e.target.value) || 28))
-                            )
+                            setPhaseManualCycleDaysInput(e.target.value.replace(/[^0-9]/g, ''))
                           }
+                          onBlur={() =>
+                            setPhaseManualCycleDaysInput(String(phaseManualCycleDays))
+                          }
+                          placeholder="e.g. 28"
                           className="bio-input font-mono-tabular w-full rounded-lg px-2.5 py-2 text-xs text-slate-100"
                         />
                       </div>
@@ -2889,15 +3595,14 @@ export function GoalsView({
                           Period Length (days)
                         </label>
                         <input
-                          type="number"
-                          min={2}
-                          max={10}
-                          value={phasePeriodDays}
+                          type="text"
+                          inputMode="numeric"
+                          value={phasePeriodDaysInput}
                           onChange={(e) =>
-                            setPhasePeriodDays(
-                              Math.max(2, Math.min(10, Number(e.target.value) || 5))
-                            )
+                            setPhasePeriodDaysInput(e.target.value.replace(/[^0-9]/g, ''))
                           }
+                          onBlur={() => setPhasePeriodDaysInput(String(phasePeriodDays))}
+                          placeholder="e.g. 5 or 6"
                           className="bio-input font-mono-tabular w-full rounded-lg px-2.5 py-2 text-xs text-slate-100"
                         />
                       </div>
@@ -3028,6 +3733,37 @@ export function GoalsView({
               </div>
             )}
 
+            {/* Week Tabs when Weekly Goal spans multiple weeks */}
+            {weekTabsForActiveGoal.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedWeekTab('all')}
+                  className={`cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium ${
+                    selectedWeekTab === 'all'
+                      ? 'bio-glow-chip'
+                      : 'border-cyan-200/15 bg-slate-950/40 text-slate-300 hover:text-slate-100'
+                  }`}
+                >
+                  All Weeks ({activeGoal.steps.length}d)
+                </button>
+                {weekTabsForActiveGoal.map((wk) => (
+                  <button
+                    key={wk.weekNum}
+                    type="button"
+                    onClick={() => setSelectedWeekTab(wk.weekNum)}
+                    className={`cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium ${
+                      selectedWeekTab === wk.weekNum
+                        ? 'bio-glow-chip'
+                        : 'border-cyan-200/15 bg-slate-950/40 text-slate-300 hover:text-slate-100'
+                    }`}
+                  >
+                    Week {wk.weekNum} (Days {wk.startStep}–{wk.endStep})
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Month Tabs when Goal spans multiple calendar months */}
             {monthTabsForActiveGoal.length > 1 && (
               <div className="flex flex-wrap items-center gap-1.5">
@@ -3059,39 +3795,71 @@ export function GoalsView({
               </div>
             )}
 
-            {/* Phase Filter Tabs */}
+            {/* Phase Filter Tabs + Phase-Only "+1 Extra Day" Controls */}
             {activeGoal.cadence === 'phase' && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setPhaseFilter('all')}
-                  className={`cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium ${
-                    phaseFilter === 'all'
-                      ? 'bio-glow-chip'
-                      : 'border-cyan-200/15 bg-slate-950/40 text-slate-300'
-                  }`}
-                >
-                  All Phases ({activeGoal.steps.length})
-                </button>
-                {(['menstrual', 'follicular', 'ovulation', 'luteal'] as const).map((ph) => {
-                  const meta = PHASE_META[ph];
-                  const count = activeGoal.steps.filter((s) => s.phase === ph).length;
-                  return (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <button
-                      key={ph}
                       type="button"
-                      onClick={() => setPhaseFilter(ph)}
-                      className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium ${
-                        phaseFilter === ph
-                          ? meta.chipClass
-                          : 'border-cyan-200/15 bg-slate-950/40 text-slate-300 hover:text-slate-100'
+                      onClick={() => setPhaseFilter('all')}
+                      className={`cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium ${
+                        phaseFilter === 'all'
+                          ? 'bio-glow-chip'
+                          : 'border-cyan-200/15 bg-slate-950/40 text-slate-300'
                       }`}
                     >
-                      <span className={`h-2 w-2 rounded-full ${meta.dotClass}`} />
-                      {meta.label} ({count})
+                      All Phases ({activeGoal.steps.length})
                     </button>
-                  );
-                })}
+                    {(['menstrual', 'follicular', 'ovulation', 'luteal'] as const).map((ph) => {
+                      const meta = PHASE_META[ph];
+                      const count = activeGoal.steps.filter((s) => s.phase === ph).length;
+                      return (
+                        <button
+                          key={ph}
+                          type="button"
+                          onClick={() => setPhaseFilter(ph)}
+                          className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium ${
+                            phaseFilter === ph
+                              ? meta.chipClass
+                              : 'border-cyan-200/15 bg-slate-950/40 text-slate-300 hover:text-slate-100'
+                          }`}
+                        >
+                          <span className={`h-2 w-2 rounded-full ${meta.dotClass}`} />
+                          {meta.label} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {phaseFilter !== 'all' && (
+                    <button
+                      type="button"
+                      onClick={() => handleAddExtraPhaseDay(activeGoal, phaseFilter)}
+                      className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-amber-300/45 bg-amber-400/15 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-400/25"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add +1 {PHASE_META[phaseFilter].label} Day
+                    </button>
+                  )}
+                </div>
+
+                {phaseFilter === 'all' && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-300/80">
+                    <span>Need an extra day in a phase (e.g. longer period or delayed cycle)?</span>
+                    {(['menstrual', 'follicular', 'ovulation', 'luteal'] as const).map((ph) => (
+                      <button
+                        key={ph}
+                        type="button"
+                        onClick={() => handleAddExtraPhaseDay(activeGoal, ph)}
+                        className="flex cursor-pointer items-center gap-1 rounded-md border border-cyan-200/20 bg-slate-950/60 px-2 py-0.5 text-[11px] font-medium text-cyan-100 hover:border-amber-300/45 hover:text-amber-100"
+                      >
+                        <Plus className="h-3 w-3" />
+                        1 {PHASE_META[ph].label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -3174,6 +3942,181 @@ export function GoalsView({
             )}
           </div>
 
+          {/* Scope-Level Master Priorities & To-Do List + Drag into Days */}
+          <div className="mt-5 rounded-xl border border-cyan-300/25 bg-[#04111b]/70 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-cyan-300/35 bg-cyan-400/12 text-cyan-200">
+                  <Layers className="h-4 w-4" />
+                </span>
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">
+                    {activeScopeInfo.label} — Master Priorities &amp; To-Do List
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Plan overarching goals for {activeScopeInfo.label.toLowerCase()}, then drag or send any saved item straight onto a numbered day bar below.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowScopePlan((v) => !v)}
+                className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/20 bg-slate-950/50 px-2.5 py-1 text-[11px] font-medium text-cyan-200 hover:border-cyan-300/45"
+              >
+                {showScopePlan ? (
+                  <>
+                    Hide <ChevronUp className="h-3.5 w-3.5" />
+                  </>
+                ) : (
+                  <>
+                    Open ({activeScopeSavedItems.length}) <ChevronDown className="h-3.5 w-3.5" />
+                  </>
+                )}
+              </button>
+            </div>
+
+            {showScopePlan && (
+              <div className="mt-4 space-y-4 border-t border-cyan-200/[0.1] pt-3.5">
+                <TaskEntriesEditor
+                  scopeKey={`${activeGoal.id}:scope:${activeScopeInfo.scopeKey}`}
+                  priorities={activeScopePlan.priorities}
+                  todos={activeScopePlan.todos}
+                  minPriorities={1}
+                  minTodos={3}
+                  isToday={false}
+                  referenceDateKey={todayIso}
+                  nowMs={nowMs}
+                  allowTomorrowPush={false}
+                  onSaveEntry={(kind, entryId, text, deadline) =>
+                    handleScopeSaveEntry(
+                      activeGoal,
+                      activeScopeInfo.scopeKey,
+                      kind,
+                      entryId,
+                      text,
+                      deadline
+                    )
+                  }
+                  onDeleteEntry={(kind, entryId) =>
+                    handleScopeDeleteEntry(activeGoal, activeScopeInfo.scopeKey, kind, entryId)
+                  }
+                  onAddSlot={(kind) =>
+                    handleScopeAddSlot(activeGoal, activeScopeInfo.scopeKey, kind)
+                  }
+                  onTickEntry={(kind, entryId) =>
+                    handleScopeTickEntry(activeGoal, activeScopeInfo.scopeKey, kind, entryId)
+                  }
+                  onMissEntry={(kind, entryId) =>
+                    handleScopeMissEntry(activeGoal, activeScopeInfo.scopeKey, kind, entryId)
+                  }
+                  onRestoreEntry={(kind, entryId) =>
+                    handleScopeRestoreEntry(activeGoal, activeScopeInfo.scopeKey, kind, entryId)
+                  }
+                  onReschedulePriority={(entryId, nextDeadline) =>
+                    handleScopeReschedulePriority(
+                      activeGoal,
+                      activeScopeInfo.scopeKey,
+                      entryId,
+                      nextDeadline
+                    )
+                  }
+                  missTooltip="Mark as not done"
+                />
+
+                {activeScopeSavedItems.length > 0 && displayedSteps.length > 0 && (
+                  <div className="rounded-xl border border-cyan-200/15 bg-slate-950/55 p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-cyan-200">
+                        Drag onto any bar below (or pick a day to place):
+                      </span>
+                      <span className="text-[11px] text-slate-400">
+                        Drops into matching Priorities or To-Do List
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      {activeScopeSavedItems.map((item) => {
+                        const defaultTarget =
+                          assignDayTargets[item.id] ?? displayedSteps[0].stepNumber;
+                        const safeTarget = displayedSteps.some(
+                          (s) => s.stepNumber === defaultTarget
+                        )
+                          ? defaultTarget
+                          : displayedSteps[0].stepNumber;
+
+                        return (
+                          <div
+                            key={item.id}
+                            draggable
+                            onDragStart={(e) => {
+                              e.dataTransfer.effectAllowed = 'copy';
+                              e.dataTransfer.setData(
+                                'application/focuspair-task',
+                                JSON.stringify({
+                                  kind: item.kind,
+                                  text: item.text,
+                                  deadline: item.deadline,
+                                })
+                              );
+                            }}
+                            className="flex cursor-grab items-center gap-2 rounded-lg border border-cyan-300/25 bg-[#061826]/90 px-2.5 py-1.5 text-xs active:cursor-grabbing hover:border-cyan-300/55"
+                          >
+                            <GripVertical className="h-3.5 w-3.5 shrink-0 text-cyan-300/75" />
+                            <span
+                              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                item.kind === 'priority'
+                                  ? 'bg-amber-400/20 text-amber-200'
+                                  : 'bg-cyan-400/15 text-cyan-200'
+                              }`}
+                            >
+                              {item.kind === 'priority' ? 'Priority' : 'To-Do'}
+                            </span>
+                            <span className="max-w-[180px] truncate font-medium text-slate-100">
+                              {item.text}
+                            </span>
+
+                            <div className="ml-1 flex items-center gap-1 border-l border-cyan-200/15 pl-2">
+                              <select
+                                aria-label={`Target day for ${item.text}`}
+                                value={safeTarget}
+                                onChange={(e) =>
+                                  setAssignDayTargets((prev) => ({
+                                    ...prev,
+                                    [item.id]: Number.parseInt(e.target.value, 10),
+                                  }))
+                                }
+                                className="bio-input font-mono-tabular h-6 rounded px-1.5 text-[11px] text-slate-100"
+                              >
+                                {displayedSteps.map((st) => (
+                                  <option key={st.stepNumber} value={st.stepNumber}>
+                                    #{st.stepNumber}
+                                    {st.dateLabel ? ` (${formatShortDate(st.dateLabel)})` : ''}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handlePlaceScopeTaskIntoStep(activeGoal, item, safeTarget)
+                                }
+                                title={`Add into #${safeTarget}`}
+                                className="flex h-6 cursor-pointer items-center gap-1 rounded bg-cyan-400/20 px-2 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-400/35"
+                              >
+                                <Send className="h-3 w-3" />
+                                Place
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Numbered Day / Step Bars Arena (1, 2, 3...) */}
           <div className="mt-6 space-y-3">
             {displayedSteps.map((step, idx) => {
@@ -3201,18 +4144,54 @@ export function GoalsView({
               const formattedDate = formatShortDate(step.dateLabel);
               const phaseMeta = step.phase ? PHASE_META[step.phase] : null;
               const nextStepNum = activeGoal.steps[step.stepNumber]?.stepNumber;
+              const isDropActive = dragOverStep === step.stepNumber;
 
               return (
-                <div key={step.stepNumber} className="space-y-2">
+                <div
+                  key={step.stepNumber}
+                  onDragOver={(e) => {
+                    if (e.dataTransfer.types.includes('application/focuspair-task')) {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = 'copy';
+                      if (dragOverStep !== step.stepNumber) {
+                        setDragOverStep(step.stepNumber);
+                      }
+                    }
+                  }}
+                  onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                      setDragOverStep((cur) => (cur === step.stepNumber ? null : cur));
+                    }
+                  }}
+                  onDrop={(e) => {
+                    const raw = e.dataTransfer.getData('application/focuspair-task');
+                    setDragOverStep(null);
+                    if (!raw) return;
+                    e.preventDefault();
+                    try {
+                      const parsed = JSON.parse(raw) as {
+                        kind: 'priority' | 'todo';
+                        text: string;
+                        deadline?: PriorityDeadline;
+                      };
+                      handlePlaceScopeTaskIntoStep(activeGoal, parsed, step.stepNumber);
+                    } catch {
+                      // Ignore malformed drag payload
+                    }
+                  }}
+                  className="space-y-2"
+                >
                   <div className="flex items-stretch gap-3 sm:gap-4">
                     {/* Number Node ONLY (1, 2, 3...) */}
                     <div
-                      className={`font-mono-tabular flex w-12 shrink-0 items-center justify-center rounded-xl text-base font-bold sm:w-14 sm:text-lg ${
-                        allStepDone
-                          ? 'goal-number-node-done text-cyan-100'
-                          : isTodayStep
-                            ? 'goal-number-node ring-2 ring-cyan-300/75 text-cyan-100'
-                            : 'goal-number-node text-slate-100'
+                      className={`font-mono-tabular flex w-12 shrink-0 items-center justify-center rounded-xl text-base font-bold transition-all sm:w-14 sm:text-lg ${
+                        isDropActive
+                          ? 'goal-number-node-done ring-2 ring-cyan-300 text-cyan-50 scale-105'
+                          : allStepDone
+                            ? 'goal-number-node-done text-cyan-100'
+                            : isTodayStep
+                              ? 'goal-number-node ring-2 ring-cyan-300/75 text-cyan-100'
+                              : 'goal-number-node text-slate-100'
                       }`}
                     >
                       {step.stepNumber}
@@ -3220,8 +4199,12 @@ export function GoalsView({
 
                     {/* Rectangular Expandable Container */}
                     <div
-                      className={`flex-1 rounded-xl px-4 py-3 ${
-                        allStepDone ? 'goal-rect-bar-done' : 'goal-rect-bar'
+                      className={`flex-1 rounded-xl px-4 py-3 transition-all ${
+                        isDropActive
+                          ? 'goal-rect-bar ring-2 ring-cyan-300 bg-cyan-400/15'
+                          : allStepDone
+                            ? 'goal-rect-bar-done'
+                            : 'goal-rect-bar'
                       }`}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3235,6 +4218,11 @@ export function GoalsView({
                           }
                           className="flex min-w-0 flex-1 cursor-pointer flex-wrap items-center gap-2 text-left text-xs"
                         >
+                          {isDropActive && (
+                            <span className="rounded bg-cyan-300/30 px-2 py-0.5 font-semibold text-cyan-50">
+                              Drop here to add to #{step.stepNumber}
+                            </span>
+                          )}
                           {isTodayStep && (
                             <span className="rounded bg-cyan-400/20 px-2 py-0.5 font-semibold text-cyan-100">
                               Today
@@ -3263,26 +4251,40 @@ export function GoalsView({
                           </span>
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setExpandedSteps((prev) => ({
-                              ...prev,
-                              [stepExpandKey]: !isExpanded,
-                            }))
-                          }
-                          className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/15 bg-slate-950/50 px-2.5 py-1 text-[11px] font-medium text-cyan-200 hover:border-cyan-300/45"
-                        >
-                          {isExpanded ? (
-                            <>
-                              Hide <ChevronUp className="h-3.5 w-3.5" />
-                            </>
-                          ) : (
-                            <>
-                              Plan <ChevronDown className="h-3.5 w-3.5" />
-                            </>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {savedItems.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => handleImportStepToDaily(activeGoal, step)}
+                              title="Copy this bar's tasks into Today's Daily Plan"
+                              className="flex cursor-pointer items-center gap-1 rounded-lg border border-amber-300/30 bg-amber-400/10 px-2.5 py-1 text-[11px] font-medium text-amber-100 hover:bg-amber-400/20"
+                            >
+                              <Download className="h-3 w-3" />
+                              To Today&apos;s Daily
+                            </button>
                           )}
-                        </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedSteps((prev) => ({
+                                ...prev,
+                                [stepExpandKey]: !isExpanded,
+                              }))
+                            }
+                            className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/15 bg-slate-950/50 px-2.5 py-1 text-[11px] font-medium text-cyan-200 hover:border-cyan-300/45"
+                          >
+                            {isExpanded ? (
+                              <>
+                                Hide <ChevronUp className="h-3.5 w-3.5" />
+                              </>
+                            ) : (
+                              <>
+                                Plan <ChevronDown className="h-3.5 w-3.5" />
+                              </>
+                            )}
+                          </button>
+                        </div>
                       </div>
 
                       {isExpanded && (
@@ -3497,15 +4499,26 @@ export function GoalsView({
               </div>
             )}
 
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={() => handleAppendStep(activeGoal)}
-                className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-dashed border-cyan-200/20 px-4 py-2 text-xs font-medium text-cyan-200/80 transition-colors hover:border-cyan-300/45 hover:bg-cyan-400/[0.06] hover:text-cyan-100"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Add #{activeGoal.steps.length + 1}
-              </button>
+            <div className="flex flex-wrap items-center gap-2.5 pt-2">
+              {activeGoal.cadence === 'phase' && phaseFilter !== 'all' ? (
+                <button
+                  type="button"
+                  onClick={() => handleAddExtraPhaseDay(activeGoal, phaseFilter)}
+                  className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-dashed border-amber-300/45 bg-amber-400/[0.06] px-4 py-2 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-400/15"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add +1 Extra {PHASE_META[phaseFilter].label} Day
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleAppendStep(activeGoal)}
+                  className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-dashed border-cyan-200/20 px-4 py-2 text-xs font-medium text-cyan-200/80 transition-colors hover:border-cyan-300/45 hover:bg-cyan-400/[0.06] hover:text-cyan-100"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add #{activeGoal.steps.length + 1}
+                </button>
+              )}
             </div>
           </div>
         </section>

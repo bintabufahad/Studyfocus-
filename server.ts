@@ -253,6 +253,7 @@ interface StoredAccount {
   passwordHash: string;
   studyCards: unknown[];
   goals?: unknown[];
+  checklistTables?: unknown[];
   activeDailyPlan?: Record<string, unknown>;
   dailyHistory?: unknown[];
   gamification?: Record<string, unknown>;
@@ -403,6 +404,9 @@ async function startServer() {
     const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
     const initialCards = Array.isArray(req.body?.studyCards) ? req.body.studyCards : [];
     const initialGoals = Array.isArray(req.body?.goals) ? req.body.goals : [];
+    const initialChecklists = Array.isArray(req.body?.checklistTables)
+      ? req.body.checklistTables
+      : [];
     const initialDailyPlan =
       req.body?.activeDailyPlan && typeof req.body.activeDailyPlan === 'object'
         ? (req.body.activeDailyPlan as Record<string, unknown>)
@@ -442,6 +446,7 @@ async function startServer() {
       passwordHash: hash,
       studyCards: initialCards,
       goals: initialGoals,
+      checklistTables: initialChecklists,
       ...(initialDailyPlan ? { activeDailyPlan: initialDailyPlan } : {}),
       dailyHistory: initialDailyHistory,
       ...(initialGamification ? { gamification: initialGamification } : {}),
@@ -462,6 +467,7 @@ async function startServer() {
         updatedAt: account.updatedAt,
         studyCards: account.studyCards,
         goals: account.goals ?? [],
+        checklistTables: account.checklistTables ?? [],
         activeDailyPlan: account.activeDailyPlan,
         dailyHistory: account.dailyHistory ?? [],
         gamification: account.gamification,
@@ -490,6 +496,7 @@ async function startServer() {
         updatedAt: account.updatedAt,
         studyCards: account.studyCards,
         goals: account.goals ?? [],
+        checklistTables: account.checklistTables ?? [],
         activeDailyPlan: account.activeDailyPlan,
         dailyHistory: account.dailyHistory ?? [],
         gamification: account.gamification,
@@ -513,6 +520,7 @@ async function startServer() {
         updatedAt: account.updatedAt,
         studyCards: account.studyCards,
         goals: account.goals ?? [],
+        checklistTables: account.checklistTables ?? [],
         activeDailyPlan: account.activeDailyPlan,
         dailyHistory: account.dailyHistory ?? [],
         gamification: account.gamification,
@@ -538,6 +546,9 @@ async function startServer() {
     account.studyCards = req.body.studyCards;
     if (Array.isArray(req.body?.goals)) {
       account.goals = req.body.goals;
+    }
+    if (Array.isArray(req.body?.checklistTables)) {
+      account.checklistTables = req.body.checklistTables;
     }
     if (req.body?.activeDailyPlan && typeof req.body.activeDailyPlan === 'object') {
       account.activeDailyPlan = req.body.activeDailyPlan as Record<string, unknown>;
