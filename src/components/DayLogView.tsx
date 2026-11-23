@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
+  ArrowUpDown,
   BookmarkCheck,
   Calendar,
   Check,
@@ -12,7 +13,6 @@ import {
   PenTool,
   Redo2,
   RotateCcw,
-  Save,
   Sparkles,
   Trash2,
   Undo2,
@@ -28,9 +28,9 @@ import { PHASE_META, resolveActiveCycleContext } from '../utils/goalRewards';
 import { toLocalDateKey } from '../utils/profileStorage';
 
 export const DAY_LOG_VIRTUAL_WIDTH = 1000;
-export const DAY_LOG_ROW_HEIGHT = 80;
+export const DAY_LOG_ROW_HEIGHT = 64;
 export const DAY_LOG_ROW_COUNT = 24;
-export const DAY_LOG_VIRTUAL_HEIGHT = DAY_LOG_ROW_HEIGHT * DAY_LOG_ROW_COUNT; // 1920
+export const DAY_LOG_VIRTUAL_HEIGHT = DAY_LOG_ROW_HEIGHT * DAY_LOG_ROW_COUNT; // 1536
 
 export interface DayLogHourSlot {
   slotIndex: number; // 0..23
@@ -112,11 +112,7 @@ const PEN_COLORS = [
   { hex: '#5eead4', label: 'Seafoam' },
 ];
 
-const PEN_WIDTHS = [
-  { px: 2.6, label: 'Fine' },
-  { px: 4.8, label: 'Medium' },
-  { px: 8.8, label: 'Marker' },
-];
+const penWidth = 4.8;
 
 function makeStrokeId(): string {
   return `st-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -313,10 +309,9 @@ export function DayLogView({
   const todayIso = toLocalDateKey(Date.now());
   const sheetDateKey = activeDayLog.dateKey || todayIso;
 
-  const [tool, setTool] = useState<'pen' | 'eraser'>('pen');
+  const [tool, setTool] = useState<'pen' | 'eraser' | 'scroll'>('pen');
   const [penColor, setPenColor] = useState<string>('#f1f5f9');
-  const [penWidth, setPenWidth] = useState<number>(4.8);
-  const [stylusOnlyMode, setStylusOnlyMode] = useState<boolean>(false);
+  const [isToolbarOpen, setIsToolbarOpen] = useState<boolean>(true);
   const [redoStack, setRedoStack] = useState<DayLogStroke[]>([]);
   const [savedToast, setSavedToast] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState<boolean>(false);
@@ -426,9 +421,12 @@ export function DayLogView({
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    // When tablet smart stylus mode is active, finger touch scrolls while pen/mouse draws
-    if (stylusOnlyMode && e.pointerType === 'touch') return;
+    if (tool === 'scroll') return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
+
+    if (e.cancelable) {
+      e.preventDefault();
+    }
 
     const pt = toVirtualPoint(e);
     activePointerIdRef.current = e.pointerId;
@@ -450,6 +448,9 @@ export function DayLogView({
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.cancelable) {
+      e.preventDefault();
+    }
     const stroke = activeStrokeRef.current;
     if (!stroke || activePointerIdRef.current !== e.pointerId) return;
 
@@ -523,14 +524,6 @@ export function DayLogView({
     flashNotice('Cleared active sheet.');
   };
 
-  const handleSaveProgress = () => {
-    onUpdateActiveDayLog((prev) => ({
-      ...prev,
-      cycleSummary: cycleSummaryText || undefined,
-      updatedAt: Date.now(),
-    }));
-    flashNotice('Saved! Your writing stays right here even if you close the site.');
-  };
 
   const handleArchiveSheet = (resetAfterArchive: boolean) => {
     const snapshot: DayLogEntry = {
@@ -568,7 +561,7 @@ export function DayLogView({
   );
 
   return (
-    <main className="relative z-10 mx-auto flex w-full max-w-[1340px] flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-6 lg:px-8 quiet-scroll">
+    <main className="relative z-10 mx-auto flex w-full max-w-[1340px] flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 pb-36 sm:px-6 lg:px-8 quiet-scroll">
       {/* Header & Persistence Guarantee */}
       <section className="glass-panel rounded-2xl p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -619,14 +612,6 @@ export function DayLogView({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={handleSaveProgress}
-              className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-cyan-300/40 bg-cyan-400/15 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/25"
-            >
-              <Save className="h-3.5 w-3.5" />
-              Save Progress
-            </button>
 
             <button
               type="button"
@@ -778,165 +763,12 @@ export function DayLogView({
         </div>
       </section>
 
-      {/* Sticky Pen Toolbar */}
-      <section className="glass-panel sticky top-2 z-20 flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-2.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setTool('pen')}
-            className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold ${
-              tool === 'pen'
-                ? 'bio-glow-chip'
-                : 'border-cyan-200/15 bg-slate-950/55 text-slate-300'
-            }`}
-          >
-            <PenTool className="h-3.5 w-3.5" />
-            Pen
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setTool('eraser')}
-            className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold ${
-              tool === 'eraser'
-                ? 'border-amber-300/60 bg-amber-400/20 text-amber-100'
-                : 'border-cyan-200/15 bg-slate-950/55 text-slate-300'
-            }`}
-          >
-            <Eraser className="h-3.5 w-3.5" />
-            Eraser
-          </button>
-
-          <div className="mx-1 h-5 w-px bg-cyan-200/15" />
-
-          {/* Ink Colors */}
-          <div className="flex items-center gap-1.5">
-            {PEN_COLORS.map((c) => {
-              const selected = tool === 'pen' && penColor === c.hex;
-              return (
-                <button
-                  key={c.hex}
-                  type="button"
-                  title={c.label}
-                  onClick={() => {
-                    setTool('pen');
-                    setPenColor(c.hex);
-                  }}
-                  style={{ backgroundColor: c.hex }}
-                  className={`h-6 w-6 cursor-pointer rounded-full border-2 transition-transform ${
-                    selected
-                      ? 'scale-115 border-cyan-300 ring-2 ring-cyan-300/60'
-                      : 'border-slate-700 opacity-85 hover:opacity-100'
-                  }`}
-                />
-              );
-            })}
-          </div>
-
-          <div className="mx-1 h-5 w-px bg-cyan-200/15" />
-
-          {/* Stroke Width */}
-          <div className="flex items-center gap-1">
-            {PEN_WIDTHS.map((w) => (
-              <button
-                key={w.label}
-                type="button"
-                onClick={() => setPenWidth(w.px)}
-                className={`cursor-pointer rounded-md border px-2 py-1 text-[11px] font-medium ${
-                  penWidth === w.px
-                    ? 'border-cyan-300/55 bg-cyan-400/20 text-cyan-100'
-                    : 'border-cyan-200/15 bg-slate-950/45 text-slate-400'
-                }`}
-              >
-                {w.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="mx-1 h-5 w-px bg-cyan-200/15" />
-
-          {/* Tablet Stylus vs Touch Draw toggle */}
-          <button
-            type="button"
-            onClick={() => setStylusOnlyMode((v) => !v)}
-            title="Switch between Smart Stylus (Pen draws / Finger scrolls) and Draw Anywhere (Pen, Finger, and Mouse all draw)"
-            className={`cursor-pointer rounded-lg border px-2.5 py-1 text-[11px] font-semibold ${
-              stylusOnlyMode
-                ? 'border-amber-300/50 bg-amber-400/15 text-amber-100'
-                : 'border-cyan-300/40 bg-cyan-400/12 text-cyan-100'
-            }`}
-          >
-            {stylusOnlyMode
-              ? 'Tablet Stylus Mode (Finger Scrolls)'
-              : 'Draw Anywhere (Pen / Mouse / Touch)'}
-          </button>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="font-mono-tabular mr-1 text-[11px] text-slate-400">
-            {activeDayLog.strokes.length} strokes
-            {writtenNotesCount > 0 ? ` · ${writtenNotesCount} notes` : ''}
-          </span>
-
-          <button
-            type="button"
-            onClick={handleUndo}
-            disabled={activeDayLog.strokes.length === 0}
-            className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/15 bg-slate-950/55 px-2.5 py-1.5 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Undo2 className="h-3.5 w-3.5" />
-            Undo
-          </button>
-
-          <button
-            type="button"
-            onClick={handleRedo}
-            disabled={redoStack.length === 0}
-            className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/15 bg-slate-950/55 px-2.5 py-1.5 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Redo2 className="h-3.5 w-3.5" />
-            Redo
-          </button>
-
-          <button
-            type="button"
-            onClick={handleDownloadPng}
-            title="Download handwritten sheet as PNG"
-            className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/15 bg-slate-950/55 px-2.5 py-1.5 text-xs text-cyan-200 hover:border-cyan-300/45"
-          >
-            <Download className="h-3.5 w-3.5" />
-            PNG
-          </button>
-
-          {confirmClear ? (
-            <div className="flex items-center gap-1 rounded-lg border border-rose-400/40 bg-rose-500/15 px-2 py-1 text-[11px]">
-              <span className="text-rose-100">Reset blank?</span>
-              <button
-                type="button"
-                onClick={handleClearSheet}
-                className="cursor-pointer rounded bg-rose-500/40 px-2 py-0.5 font-semibold text-white"
-              >
-                Yes
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmClear(false)}
-                className="cursor-pointer px-1.5 text-slate-300"
-              >
-                No
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setConfirmClear(true)}
-              className="flex cursor-pointer items-center gap-1 rounded-lg border border-rose-400/25 bg-rose-500/10 px-2.5 py-1.5 text-xs text-rose-200 hover:bg-rose-500/20"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Clear Sheet
-            </button>
-          )}
-        </div>
+      {/* Tablet Orientation & Scroll Reminder Notice */}
+      <section className="glass-panel flex items-center gap-2.5 rounded-xl border border-cyan-300/35 bg-cyan-400/10 px-4 py-3 text-xs text-cyan-100">
+        <Sparkles className="h-4 w-4 shrink-0 text-cyan-300" />
+        <span>
+          <strong>Tablet Reminder:</strong> For best writing and scrolling experience, rotate your tablet to portrait. Click the floating <strong>Scroll</strong> button at the bottom whenever you want to scroll up and down, and click <strong>Pen</strong> when writing!
+        </span>
       </section>
 
       {/* 4:00 AM → 3:00 AM Lined Writing Sheet */}
@@ -950,7 +782,7 @@ export function DayLogView({
             {DAY_LOG_HOURS.map((slot) => (
               <div
                 key={slot.hourKey}
-                className={`relative flex h-[80px] border-b border-cyan-200/15 ${
+                className={`relative flex h-[64px] border-b border-cyan-200/15 ${
                   slot.slotIndex % 2 === 1 ? 'bg-cyan-400/[0.025]' : ''
                 }`}
               >
@@ -978,13 +810,19 @@ export function DayLogView({
           {/* Transparent Interactive Stylus Ink Canvas */}
           <canvas
             ref={canvasRef}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={finishStroke}
-            onPointerCancel={finishStroke}
+            onPointerDown={tool === 'scroll' ? undefined : handlePointerDown}
+            onPointerMove={tool === 'scroll' ? undefined : handlePointerMove}
+            onPointerUp={tool === 'scroll' ? undefined : finishStroke}
+            onPointerCancel={tool === 'scroll' ? undefined : finishStroke}
             className={`absolute inset-0 z-10 h-full w-full ${
-              stylusOnlyMode ? 'touch-pan-y' : 'touch-none'
-            } ${tool === 'eraser' ? 'cursor-cell' : 'cursor-crosshair'}`}
+              tool === 'scroll' ? 'pointer-events-none' : 'touch-none'
+            } ${
+              tool === 'scroll'
+                ? 'cursor-default'
+                : tool === 'eraser'
+                  ? 'cursor-cell'
+                  : 'cursor-crosshair'
+            }`}
           />
 
           {/* Interactive Gutter Tag Overlay (never steals strokes from main writing sheet) */}
@@ -992,7 +830,7 @@ export function DayLogView({
             {DAY_LOG_HOURS.map((slot) => (
               <div
                 key={`tag-${slot.hourKey}`}
-                className="flex h-[80px] flex-col justify-end px-2.5 pb-1.5"
+                className="flex h-[64px] flex-col justify-end px-2.5 pb-1.5"
               >
                 <input
                   type="text"
@@ -1036,6 +874,139 @@ export function DayLogView({
           </button>
         </div>
       </section>
+
+      {/* Collapsible Floating Toolbar Widget (Minimize to a small corner button so 3 AM hours are never blocked!) */}
+      {!isToolbarOpen ? (
+        <button
+          type="button"
+          onClick={() => setIsToolbarOpen(true)}
+          title="Open Writing Tools"
+          className="fixed bottom-6 right-6 z-50 flex h-13 w-13 cursor-pointer items-center justify-center rounded-full border border-cyan-300/60 bg-slate-950/95 text-cyan-200 shadow-2xl backdrop-blur-xl hover:scale-110 hover:border-cyan-300"
+        >
+          <PenTool className="h-5 w-5" />
+        </button>
+      ) : (
+        <section className="fixed bottom-6 right-6 z-50 flex flex-col gap-2.5 rounded-2xl border border-cyan-300/40 bg-slate-950/95 p-3.5 shadow-2xl backdrop-blur-xl max-w-[92vw] sm:max-w-[480px]">
+          <div className="flex items-center justify-between border-b border-cyan-200/15 pb-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-200">
+              <PenTool className="h-3.5 w-3.5" />
+              Writing Tools &amp; Palette
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsToolbarOpen(false)}
+              title="Minimize to small corner button"
+              className="cursor-pointer rounded-lg border border-cyan-200/25 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-800"
+            >
+              Minimize ✕
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setTool('pen')}
+              className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                tool === 'pen'
+                  ? 'bio-glow-chip'
+                  : 'border-cyan-200/15 bg-slate-950/55 text-slate-300'
+              }`}
+            >
+              <PenTool className="h-3.5 w-3.5" />
+              Pen
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setTool('eraser')}
+              className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                tool === 'eraser'
+                  ? 'border-amber-300/60 bg-amber-400/20 text-amber-100'
+                  : 'border-cyan-200/15 bg-slate-950/55 text-slate-300'
+              }`}
+            >
+              <Eraser className="h-3.5 w-3.5" />
+              Eraser
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setTool('scroll')}
+              title="Scroll mode: click to scroll up and down freely"
+              className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                tool === 'scroll'
+                  ? 'border-emerald-300/60 bg-emerald-400/20 text-emerald-100'
+                  : 'border-cyan-200/15 bg-slate-950/55 text-slate-300'
+              }`}
+            >
+              <ArrowUpDown className="h-3.5 w-3.5" />
+              Scroll
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            {/* Ink Colors */}
+            <div className="flex items-center gap-1.5">
+              {PEN_COLORS.map((c) => {
+                const selected = tool === 'pen' && penColor === c.hex;
+                return (
+                  <button
+                    key={c.hex}
+                    type="button"
+                    title={c.label}
+                    onClick={() => {
+                      setTool('pen');
+                      setPenColor(c.hex);
+                    }}
+                    style={{ backgroundColor: c.hex }}
+                    className={`h-6 w-6 cursor-pointer rounded-full border-2 transition-transform ${
+                      selected
+                        ? 'scale-115 border-cyan-300 ring-2 ring-cyan-300/60'
+                        : 'border-slate-700 opacity-85 hover:opacity-100'
+                    }`}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <span className="font-mono-tabular text-[11px] text-slate-400">
+                {activeDayLog.strokes.length} strokes
+              </span>
+
+              <button
+                type="button"
+                onClick={handleUndo}
+                disabled={activeDayLog.strokes.length === 0}
+                className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/15 bg-slate-950/55 px-2 py-1 text-xs text-slate-200 disabled:opacity-40"
+              >
+                <Undo2 className="h-3.5 w-3.5" />
+                Undo
+              </button>
+
+              <button
+                type="button"
+                onClick={handleRedo}
+                disabled={redoStack.length === 0}
+                className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/15 bg-slate-950/55 px-2 py-1 text-xs text-slate-200 disabled:opacity-40"
+              >
+                <Redo2 className="h-3.5 w-3.5" />
+                Redo
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDownloadPng}
+                title="Download PNG"
+                className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-200/15 bg-slate-950/55 px-2 py-1 text-xs text-cyan-200"
+              >
+                <Download className="h-3.5 w-3.5" />
+                PNG
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
     </main>
   );
 }
