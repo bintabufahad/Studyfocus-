@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
+  ArrowRight,
   Award,
   BellRing,
   Calendar,
@@ -8,6 +9,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Copy,
   CornerDownRight,
   Download,
   Edit3,
@@ -16,8 +18,10 @@ import {
   HeartPulse,
   History,
   Layers,
+  Link2,
   PenTool,
   Plus,
+  RefreshCw,
   RotateCcw,
   Save,
   Send,
@@ -49,16 +53,24 @@ import type {
   StudySessionCard,
 } from '../types';
 import {
+  addDaysToDateKey,
   applyGoalCompletionReward,
   BADGE_DEFS,
   computeCyclePhaseForDay,
   computeLevelInfo,
   computePhaseDayBreakdown,
+  deriveCycleStatsFromLogs,
+  formatIsoWithWeekday,
   PHASE_META,
   resolveActiveCycleContext,
+  resolveStepDateIso,
 } from '../utils/goalRewards';
 import { playCueSound } from '../utils/soundCues';
-import { toLocalDateKey } from '../utils/profileStorage';
+import {
+  hydrateDailyPlanWithGoalsAndSchedule,
+  resolveMatchingStepIndexForDate,
+  toLocalDateKey,
+} from '../utils/profileStorage';
 import { FLOW_LEVEL_OPTIONS } from './DayLogView';
 import {
   computeDueTimestampForDeadline,
@@ -72,11 +84,15 @@ interface GoalsViewProps {
   goals: GoalPlan[];
   activeDailyPlan: DailyPlanRecord;
   dailyHistory: DailyPlanRecord[];
+  scheduledDailyPlans: Record<string, DailyPlanRecord>;
   gamification: GamificationStats;
   cycleLogs: Record<string, CycleDayLog>;
   onUpdateGoals: (updater: (prev: GoalPlan[]) => GoalPlan[]) => void;
   onUpdateDailyPlan: (updater: (prev: DailyPlanRecord) => DailyPlanRecord) => void;
   onUpdateDailyHistory: (updater: (prev: DailyPlanRecord[]) => DailyPlanRecord[]) => void;
+  onUpdateScheduledDailyPlans: (
+    updater: (prev: Record<string, DailyPlanRecord>) => Record<string, DailyPlanRecord>
+  ) => void;
   onUpdateGamification: (updater: (prev: GamificationStats) => GamificationStats) => void;
   onUpdateCycleLog: (dateKey: string, updater: (prev: CycleDayLog) => CycleDayLog) => void;
   onOpenDayLogTab?: () => void;
@@ -447,6 +463,8 @@ interface TaskEntriesEditorProps {
   onMissEntry: (kind: 'priority' | 'todo', entryId: string) => void;
   onRestoreEntry: (kind: 'priority' | 'todo', entryId: string) => void;
   onReschedulePriority: (entryId: string, nextDeadline: PriorityDeadline) => void;
+  onMoveEntryToDate?: (entry: GoalTaskEntry, targetDateKey: string) => void;
+  onCopyEntryToDates?: (entry: GoalTaskEntry, targetDateKeys: string[]) => void;
   missTooltip: string;
 }
 
@@ -467,8 +485,16 @@ function TaskEntriesEditor({
   onMissEntry,
   onRestoreEntry,
   onReschedulePriority,
+  onMoveEntryToDate,
+  onCopyEntryToDates,
   missTooltip,
 }: TaskEntriesEditorProps) {
+  const baseDateKey =
+    referenceDateKey && /^\d{4}-\d{2}-\d{2}$/.test(referenceDateKey)
+      ? referenceDateKey
+      : toLocalDateKey(Date.now());
+  const nextDayKey = addDaysToDateKey(baseDateKey, 1);
+
   const [draftTexts, setDraftTexts] = useState<Record<string, string>>({});
   const [draftDeadlines, setDraftDeadlines] = useState<Record<string, PriorityDeadline>>({});
   const [editingIds, setEditingIds] = useState<Record<string, boolean>>({});
@@ -477,6 +503,11 @@ function TaskEntriesEditor({
     mode: 'clock',
     clockTime: '17:00',
   });
+  const [movePickerId, setMovePickerId] = useState<string | null>(null);
+  const [moveCustomDate, setMoveCustomDate] = useState<string>(nextDayKey);
+  const [copyPickerId, setCopyPickerId] = useState<string | null>(null);
+  const [copySelectedDates, setCopySelectedDates] = useState<string[]>([]);
+  const [copyCustomDate, setCopyCustomDate] = useState<string>(nextDayKey);
 
   const renderEntryRow = (entry: GoalTaskEntry, index: number) => {
     const fullKey = `${scopeKey}:${entry.id}`;
@@ -694,6 +725,61 @@ function TaskEntriesEditor({
                   <>
                     {!isDone && (
                       <>
+                        {onMoveEntryToDate && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => onMoveEntryToDate(entry, nextDayKey)}
+                              title={`Move to next day (${formatShortDate(nextDayKey) ?? nextDayKey})`}
+                              aria-label="Move to next day"
+                              className="flex h-8 cursor-pointer items-center gap-1 rounded-lg border border-cyan-300/25 bg-cyan-400/[0.07] px-2 text-[11px] font-medium text-cyan-100 hover:border-cyan-300/55 hover:bg-cyan-400/18"
+                            >
+                              <ArrowRight className="h-3.5 w-3.5" />
+                              <span className="hidden sm:inline">Next Day</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMovePickerId((cur) => (cur === entry.id ? null : entry.id));
+                                setMoveCustomDate(nextDayKey);
+                                setCopyPickerId(null);
+                              }}
+                              title="Move to custom date"
+                              aria-label="Move to custom date"
+                              className={`flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg border transition-colors ${
+                                movePickerId === entry.id
+                                  ? 'border-cyan-300/60 bg-cyan-400/20 text-cyan-100'
+                                  : 'border-cyan-200/15 bg-slate-900/50 text-slate-300 hover:border-cyan-300/45 hover:text-cyan-100'
+                              }`}
+                            >
+                              <Calendar className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        )}
+                        {onCopyEntryToDates && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCopyPickerId((cur) => (cur === entry.id ? null : entry.id));
+                              setCopySelectedDates([
+                                addDaysToDateKey(baseDateKey, 1),
+                                addDaysToDateKey(baseDateKey, 2),
+                                addDaysToDateKey(baseDateKey, 3),
+                              ]);
+                              setCopyCustomDate(nextDayKey);
+                              setMovePickerId(null);
+                            }}
+                            title="Copy to multiple selected dates"
+                            aria-label="Copy to multiple dates"
+                            className={`flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg border transition-colors ${
+                              copyPickerId === entry.id
+                                ? 'border-amber-300/60 bg-amber-400/20 text-amber-100'
+                                : 'border-cyan-200/15 bg-slate-900/50 text-slate-300 hover:border-amber-300/45 hover:text-amber-100'
+                            }`}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => {
@@ -774,6 +860,174 @@ function TaskEntriesEditor({
                   >
                     <X className="h-3 w-3" /> No
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* Move to Custom Date Popover */}
+            {movePickerId === entry.id && onMoveEntryToDate && (
+              <div className="ml-8 flex flex-wrap items-center gap-2 rounded-lg border border-cyan-300/30 bg-slate-950/80 p-2.5 text-xs">
+                <span className="font-medium text-cyan-100">Move to date:</span>
+                {[1, 2, 3].map((offset) => {
+                  const target = addDaysToDateKey(baseDateKey, offset);
+                  return (
+                    <button
+                      key={offset}
+                      type="button"
+                      onClick={() => {
+                        onMoveEntryToDate(entry, target);
+                        setMovePickerId(null);
+                      }}
+                      className="cursor-pointer rounded border border-cyan-300/30 bg-cyan-400/10 px-2 py-1 text-[11px] font-medium text-cyan-100 hover:bg-cyan-400/20"
+                    >
+                      {offset === 1 ? 'Next Day (+1d)' : `+${offset}d (${formatShortDate(target)})`}
+                    </button>
+                  );
+                })}
+                <input
+                  type="date"
+                  value={moveCustomDate}
+                  onChange={(e) => setMoveCustomDate(e.target.value)}
+                  className="bio-input h-7 rounded px-2 text-[11px] text-slate-100"
+                />
+                <button
+                  type="button"
+                  disabled={!/^\d{4}-\d{2}-\d{2}$/.test(moveCustomDate)}
+                  onClick={() => {
+                    onMoveEntryToDate(entry, moveCustomDate);
+                    setMovePickerId(null);
+                  }}
+                  className="bio-btn-primary h-7 cursor-pointer rounded px-2.5 text-[11px] font-semibold disabled:opacity-40"
+                >
+                  Move
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMovePickerId(null)}
+                  className="cursor-pointer px-1.5 text-[11px] text-slate-400 hover:text-slate-100"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {/* Multi-Date Selective Copy Popover */}
+            {copyPickerId === entry.id && onCopyEntryToDates && (
+              <div className="ml-8 space-y-2 rounded-lg border border-amber-300/30 bg-slate-950/85 p-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium text-amber-100">
+                    Copy &ldquo;{entry.text}&rdquo; to selected dates:
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {[3, 5, 7].map((days) => (
+                      <button
+                        key={days}
+                        type="button"
+                        onClick={() =>
+                          setCopySelectedDates(
+                            Array.from({ length: days }, (_, idx) =>
+                              addDaysToDateKey(baseDateKey, idx + 1)
+                            )
+                          )
+                        }
+                        className="cursor-pointer rounded border border-amber-300/30 bg-amber-400/10 px-2 py-0.5 text-[11px] font-medium text-amber-100 hover:bg-amber-400/20"
+                      >
+                        Next {days}d
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[1, 2, 3, 4, 5, 6, 7].map((offset) => {
+                    const dk = addDaysToDateKey(baseDateKey, offset);
+                    const picked = copySelectedDates.includes(dk);
+                    return (
+                      <button
+                        key={dk}
+                        type="button"
+                        onClick={() =>
+                          setCopySelectedDates((prev) =>
+                            prev.includes(dk) ? prev.filter((d) => d !== dk) : [...prev, dk].sort()
+                          )
+                        }
+                        className={`cursor-pointer rounded-md border px-2 py-1 text-[11px] font-medium transition ${
+                          picked
+                            ? 'border-amber-300/60 bg-amber-400/20 text-amber-100'
+                            : 'border-cyan-200/15 bg-slate-900/60 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {formatIsoWithWeekday(dk)}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 border-t border-cyan-200/[0.08] pt-2">
+                  <input
+                    type="date"
+                    value={copyCustomDate}
+                    onChange={(e) => setCopyCustomDate(e.target.value)}
+                    className="bio-input h-7 rounded px-2 text-[11px] text-slate-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (/^\d{4}-\d{2}-\d{2}$/.test(copyCustomDate)) {
+                        setCopySelectedDates((prev) =>
+                          Array.from(new Set([...prev, copyCustomDate])).sort()
+                        );
+                      }
+                    }}
+                    className="h-7 cursor-pointer rounded border border-cyan-200/20 bg-cyan-400/10 px-2 text-[11px] text-cyan-100 hover:bg-cyan-400/20"
+                  >
+                    + Add Date
+                  </button>
+
+                  {copySelectedDates
+                    .filter((d) => {
+                      const diff =
+                        Math.round(
+                          (new Date(`${d}T00:00:00`).getTime() -
+                            new Date(`${baseDateKey}T00:00:00`).getTime()) /
+                            86400000
+                        );
+                      return diff < 1 || diff > 7;
+                    })
+                    .map((customD) => (
+                      <button
+                        key={customD}
+                        type="button"
+                        onClick={() =>
+                          setCopySelectedDates((prev) => prev.filter((x) => x !== customD))
+                        }
+                        className="flex cursor-pointer items-center gap-1 rounded border border-amber-300/45 bg-amber-400/15 px-2 py-0.5 text-[11px] text-amber-100"
+                      >
+                        {formatShortDate(customD)} <X className="h-3 w-3" />
+                      </button>
+                    ))}
+
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={copySelectedDates.length === 0}
+                      onClick={() => {
+                        onCopyEntryToDates(entry, copySelectedDates);
+                        setCopyPickerId(null);
+                      }}
+                      className="bio-btn-primary h-7 cursor-pointer rounded px-3 text-[11px] font-semibold disabled:opacity-40"
+                    >
+                      Copy to {copySelectedDates.length}{' '}
+                      {copySelectedDates.length === 1 ? 'Day' : 'Days'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCopyPickerId(null)}
+                      className="cursor-pointer px-1.5 text-[11px] text-slate-400 hover:text-slate-100"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -872,11 +1126,13 @@ export function GoalsView({
   goals,
   activeDailyPlan,
   dailyHistory,
+  scheduledDailyPlans,
   gamification,
   cycleLogs,
   onUpdateGoals,
   onUpdateDailyPlan,
   onUpdateDailyHistory,
+  onUpdateScheduledDailyPlans,
   onUpdateGamification,
   onUpdateCycleLog,
   onOpenDayLogTab,
@@ -889,6 +1145,7 @@ export function GoalsView({
   const [showTrophies, setShowTrophies] = useState(false);
   const [showDailyHistory, setShowDailyHistory] = useState(false);
   const [showGoalImportDrawer, setShowGoalImportDrawer] = useState(false);
+  const [showScheduledDays, setShowScheduledDays] = useState(false);
   const [selectedImportIds, setSelectedImportIds] = useState<Record<string, boolean>>({});
   const [showSplitter, setShowSplitter] = useState(false);
 
@@ -944,7 +1201,7 @@ export function GoalsView({
     return Number.isFinite(parsed) ? Math.max(1, Math.min(14, parsed)) : 6;
   }, [phasePeriodDaysInput]);
   const [phaseFilter, setPhaseFilter] = useState<'all' | GoalPhaseKind>('all');
-  const [showCycleTable, setShowCycleTable] = useState<boolean>(true);
+  const [showCycleTable, setShowCycleTable] = useState<boolean>(false);
 
   // Week / Month tab filters, Scope Master Plan, Drag-and-Drop & Expanded Bars
   const [selectedWeekTab, setSelectedWeekTab] = useState<'all' | number>('all');
@@ -1062,6 +1319,265 @@ export function GoalsView({
   );
 
   // ============================================================================
+  // Daily Plan <-> Goals Live Auto-Sync Helpers
+  // ============================================================================
+
+  const syncedGoalIdSet = useMemo(
+    () => new Set(activeDailyPlan.syncedGoalIds ?? []),
+    [activeDailyPlan.syncedGoalIds]
+  );
+  const isAutoSyncOn = activeDailyPlan.autoSyncGoals !== false;
+
+  const isStepSyncedWithPlan = (goal: GoalPlan, stepNumber: number, dateKey: string): boolean => {
+    const idx = resolveMatchingStepIndexForDate(goal, dateKey);
+    return idx !== -1 && goal.steps[idx]?.stepNumber === stepNumber;
+  };
+
+  const mirrorDailyMutationToSyncedGoals = (
+    dateKey: string,
+    op:
+      | { type: 'upsert'; entry: GoalTaskEntry; prevText?: string }
+      | { type: 'delete'; entry: GoalTaskEntry }
+      | { type: 'status'; entry: GoalTaskEntry; status: 'pending' | 'done' | 'missed'; deadline?: PriorityDeadline }
+  ) => {
+    if (!isAutoSyncOn || syncedGoalIdSet.size === 0) return;
+
+    onUpdateGoals((prevGoals) =>
+      prevGoals.map((goal) => {
+        if (!syncedGoalIdSet.has(goal.id)) return goal;
+        const stepIdx = resolveMatchingStepIndexForDate(goal, dateKey);
+        if (stepIdx === -1) return goal;
+
+        const targetStep = goal.steps[stepIdx];
+        const kind = op.entry.kind;
+        const listKey = kind === 'priority' ? 'priorities' : 'todos';
+        const minSlots = kind === 'priority' ? 1 : 3;
+        const existingList = [...(targetStep[listKey] ?? [makeEmptyEntry(kind)])];
+        const entrySyncKey = op.entry.syncKey;
+
+        const matchIndex = existingList.findIndex((item) => {
+          const generatedKey = `goal:${goal.id}:s${targetStep.stepNumber}:${kind === 'priority' ? 'pri' : 'todo'}:${item.id}`;
+          if (entrySyncKey && (item.syncKey === entrySyncKey || generatedKey === entrySyncKey)) {
+            return true;
+          }
+          if (op.type === 'upsert' && op.prevText && item.text.trim().toLowerCase() === op.prevText.trim().toLowerCase()) {
+            return true;
+          }
+          return Boolean(op.entry.text.trim()) && item.text.trim().toLowerCase() === op.entry.text.trim().toLowerCase();
+        });
+
+        let nextList = existingList;
+        if (op.type === 'delete') {
+          if (matchIndex === -1) return goal;
+          nextList = existingList.filter((_, idx) => idx !== matchIndex);
+          while (nextList.length < minSlots) {
+            nextList.push(makeEmptyEntry(kind));
+          }
+        } else if (op.type === 'status') {
+          if (matchIndex === -1) return goal;
+          nextList = existingList.map((item, idx) =>
+            idx === matchIndex
+              ? {
+                  ...item,
+                  status: op.status,
+                  completedAt: op.status === 'done' ? Date.now() : undefined,
+                  missedAt: op.status === 'missed' ? Date.now() : undefined,
+                  ...(op.deadline !== undefined ? { deadline: op.deadline } : {}),
+                  ...(entrySyncKey ? { syncKey: entrySyncKey } : {}),
+                }
+              : item
+          );
+        } else {
+          // upsert
+          const cleanText = op.entry.text.trim();
+          if (!cleanText) return goal;
+          if (matchIndex !== -1) {
+            nextList = existingList.map((item, idx) =>
+              idx === matchIndex
+                ? {
+                    ...item,
+                    text: cleanText,
+                    status: op.entry.status === 'empty' ? 'pending' : op.entry.status,
+                    ...(kind === 'priority' ? { deadline: op.entry.deadline } : {}),
+                    ...(entrySyncKey ? { syncKey: entrySyncKey } : {}),
+                  }
+                : item
+            );
+          } else {
+            const newStepEntry: GoalTaskEntry = {
+              id: makeId(kind === 'priority' ? 'pri' : 'todo'),
+              kind,
+              text: cleanText,
+              status: op.entry.status === 'empty' ? 'pending' : op.entry.status,
+              ...(kind === 'priority' && op.entry.deadline ? { deadline: op.entry.deadline } : {}),
+              ...(entrySyncKey ? { syncKey: entrySyncKey } : {}),
+            };
+            const emptyIdx = nextList.findIndex((item) => !item.text.trim());
+            if (emptyIdx !== -1) nextList[emptyIdx] = newStepEntry;
+            else nextList.push(newStepEntry);
+          }
+        }
+
+        const nextSteps = goal.steps.map((s, idx) =>
+          idx === stepIdx ? { ...s, [listKey]: nextList } : s
+        );
+        return {
+          ...goal,
+          steps: nextSteps,
+          updatedAt: Date.now(),
+        };
+      })
+    );
+  };
+
+  const mirrorGoalStepMutationToDaily = (
+    goal: GoalPlan,
+    stepNumber: number,
+    op:
+      | { type: 'upsert'; entry: GoalTaskEntry; prevText?: string }
+      | { type: 'delete'; entry: GoalTaskEntry }
+      | { type: 'status'; entry: GoalTaskEntry; status: 'pending' | 'done' | 'missed'; deadline?: PriorityDeadline }
+  ) => {
+    if (!isAutoSyncOn || !syncedGoalIdSet.has(goal.id)) return;
+    if (!isStepSyncedWithPlan(goal, stepNumber, activeDailyPlan.dateKey)) return;
+
+    const kind = op.entry.kind;
+    const listKey = kind === 'priority' ? 'priorities' : 'todos';
+    const minSlots = kind === 'priority' ? 3 : 5;
+    const stepSyncKey =
+      op.entry.syncKey ??
+      `goal:${goal.id}:s${stepNumber}:${kind === 'priority' ? 'pri' : 'todo'}:${op.entry.id}`;
+
+    onUpdateDailyPlan((prev) => {
+      const existingList = [...prev[listKey]];
+      const matchIndex = existingList.findIndex((item) => {
+        if (item.syncKey && item.syncKey === stepSyncKey) return true;
+        if (op.type === 'upsert' && op.prevText && item.text.trim().toLowerCase() === op.prevText.trim().toLowerCase()) {
+          return true;
+        }
+        return Boolean(op.entry.text.trim()) && item.text.trim().toLowerCase() === op.entry.text.trim().toLowerCase();
+      });
+
+      let nextList = existingList;
+      if (op.type === 'delete') {
+        if (matchIndex === -1) return prev;
+        nextList = existingList.filter((_, idx) => idx !== matchIndex);
+        while (nextList.length < minSlots) {
+          nextList.push(makeEmptyEntry(kind));
+        }
+      } else if (op.type === 'status') {
+        if (matchIndex === -1) return prev;
+        nextList = existingList.map((item, idx) =>
+          idx === matchIndex
+            ? {
+                ...item,
+                status: op.status,
+                completedAt: op.status === 'done' ? Date.now() : undefined,
+                missedAt: op.status === 'missed' ? Date.now() : undefined,
+                ...(op.deadline !== undefined ? { deadline: op.deadline } : {}),
+                syncKey: stepSyncKey,
+              }
+            : item
+        );
+      } else {
+        const cleanText = op.entry.text.trim();
+        if (!cleanText) return prev;
+        if (matchIndex !== -1) {
+          nextList = existingList.map((item, idx) =>
+            idx === matchIndex
+              ? {
+                  ...item,
+                  text: cleanText,
+                  status: op.entry.status === 'empty' ? 'pending' : op.entry.status,
+                  ...(kind === 'priority' ? { deadline: op.entry.deadline } : {}),
+                  syncKey: stepSyncKey,
+                }
+              : item
+          );
+        } else {
+          const newDailyEntry: GoalTaskEntry = {
+            id: makeId(kind === 'priority' ? 'pri' : 'todo'),
+            kind,
+            text: cleanText,
+            status: op.entry.status === 'empty' ? 'pending' : op.entry.status,
+            ...(kind === 'priority' && op.entry.deadline
+              ? { deadline: computeDueTimestampForDeadline(op.entry.deadline, prev.dateKey) }
+              : {}),
+            syncKey: stepSyncKey,
+          };
+          const emptyIdx = nextList.findIndex((item) => !item.text.trim());
+          if (emptyIdx !== -1) nextList[emptyIdx] = newDailyEntry;
+          else nextList.push(newDailyEntry);
+        }
+      }
+
+      return {
+        ...prev,
+        updatedAt: Date.now(),
+        [listKey]: nextList,
+      };
+    });
+  };
+
+  const handleToggleGoalSync = (goalId: string) => {
+    const goalObj = goals.find((g) => g.id === goalId);
+    const currentSynced = activeDailyPlan.syncedGoalIds ?? [];
+    const enabling = !currentSynced.includes(goalId);
+    const nextSyncedIds = enabling
+      ? [...currentSynced, goalId]
+      : currentSynced.filter((id) => id !== goalId);
+
+    onUpdateDailyPlan((prev) => {
+      const updatedPlan: DailyPlanRecord = {
+        ...prev,
+        syncedGoalIds: nextSyncedIds,
+        autoSyncGoals: enabling ? true : prev.autoSyncGoals,
+        updatedAt: Date.now(),
+      };
+      if (!enabling) return updatedPlan;
+      return hydrateDailyPlanWithGoalsAndSchedule(
+        updatedPlan,
+        goals,
+        scheduledDailyPlans,
+        prev.dateKey
+      ).dailyPlan;
+    });
+
+    if (goalObj) {
+      showNotice(
+        enabling
+          ? `Live Auto-Sync ON with "${goalObj.title}". Changes sync both ways automatically.`
+          : `Auto-Sync paused for "${goalObj.title}".`
+      );
+    }
+  };
+
+  const handleToggleAutoSyncGoals = () => {
+    const nextAuto = !(activeDailyPlan.autoSyncGoals !== false);
+    onUpdateDailyPlan((prev) => {
+      const updatedPlan: DailyPlanRecord = {
+        ...prev,
+        autoSyncGoals: nextAuto,
+        updatedAt: Date.now(),
+      };
+      if (!nextAuto) return updatedPlan;
+      return hydrateDailyPlanWithGoalsAndSchedule(
+        updatedPlan,
+        goals,
+        scheduledDailyPlans,
+        prev.dateKey
+      ).dailyPlan;
+    });
+    showNotice(
+      nextAuto
+        ? 'Automatic Goal syncing resumed for Today.'
+        : 'Automatic Goal syncing paused.'
+    );
+  };
+
+  const [showGoalSyncDrawer, setShowGoalSyncDrawer] = useState(false);
+
+  // ============================================================================
   // Daily Plan Handlers (Today's Auto-Expiring Plan)
   // ============================================================================
 
@@ -1071,26 +1587,41 @@ export function GoalsView({
     text: string,
     deadline?: PriorityDeadline
   ) => {
+    const list = kind === 'priority' ? activeDailyPlan.priorities : activeDailyPlan.todos;
+    const existing = list.find((item) => item.id === entryId);
+    const prevText = existing?.text ?? '';
+    const sharedSyncKey =
+      existing?.syncKey ?? (syncedGoalIdSet.size > 0 && isAutoSyncOn ? `daily:${entryId}` : undefined);
+
+    const nextEntry: GoalTaskEntry = {
+      id: entryId,
+      kind,
+      text,
+      status: existing && existing.status !== 'empty' ? existing.status : 'pending',
+      ...(kind === 'priority' ? { deadline } : {}),
+      ...(sharedSyncKey ? { syncKey: sharedSyncKey } : {}),
+    };
+
     onUpdateDailyPlan((prev) => {
       const listKey = kind === 'priority' ? 'priorities' : 'todos';
       return {
         ...prev,
         updatedAt: Date.now(),
-        [listKey]: prev[listKey].map((item) =>
-          item.id === entryId
-            ? {
-                ...item,
-                text,
-                status: item.status === 'empty' ? 'pending' : item.status,
-                ...(kind === 'priority' ? { deadline } : {}),
-              }
-            : item
-        ),
+        [listKey]: prev[listKey].map((item) => (item.id === entryId ? nextEntry : item)),
       };
+    });
+
+    mirrorDailyMutationToSyncedGoals(activeDailyPlan.dateKey, {
+      type: 'upsert',
+      entry: nextEntry,
+      prevText,
     });
   };
 
   const handleDailyDeleteEntry = (kind: 'priority' | 'todo', entryId: string) => {
+    const list = kind === 'priority' ? activeDailyPlan.priorities : activeDailyPlan.todos;
+    const target = list.find((item) => item.id === entryId);
+
     onUpdateDailyPlan((prev) => {
       const listKey = kind === 'priority' ? 'priorities' : 'todos';
       const minSlots = kind === 'priority' ? 3 : 5;
@@ -1104,6 +1635,13 @@ export function GoalsView({
         [listKey]: filtered,
       };
     });
+
+    if (target && target.text.trim()) {
+      mirrorDailyMutationToSyncedGoals(activeDailyPlan.dateKey, {
+        type: 'delete',
+        entry: target,
+      });
+    }
   };
 
   const handleDailyAddSlot = (kind: 'priority' | 'todo') => {
@@ -1123,6 +1661,7 @@ export function GoalsView({
     if (!target || !target.text.trim()) return;
 
     const wasDone = target.status === 'done';
+    const nextStatus: 'pending' | 'done' = wasDone ? 'pending' : 'done';
     onUpdateDailyPlan((prev) => {
       const listKey = kind === 'priority' ? 'priorities' : 'todos';
       return {
@@ -1132,7 +1671,7 @@ export function GoalsView({
           item.id === entryId
             ? {
                 ...item,
-                status: wasDone ? 'pending' : 'done',
+                status: nextStatus,
                 completedAt: wasDone ? undefined : Date.now(),
                 missedAt: undefined,
               }
@@ -1141,12 +1680,21 @@ export function GoalsView({
       };
     });
 
+    mirrorDailyMutationToSyncedGoals(activeDailyPlan.dateKey, {
+      type: 'status',
+      entry: target,
+      status: nextStatus,
+    });
+
     if (!wasDone) {
       awardCompletionRewards(kind === 'priority' ? 55 : 35, false);
     }
   };
 
   const handleDailyMissEntry = (kind: 'priority' | 'todo', entryId: string) => {
+    const list = kind === 'priority' ? activeDailyPlan.priorities : activeDailyPlan.todos;
+    const target = list.find((e) => e.id === entryId);
+
     onUpdateDailyPlan((prev) => {
       const listKey = kind === 'priority' ? 'priorities' : 'todos';
       return {
@@ -1159,11 +1707,21 @@ export function GoalsView({
         ),
       };
     });
+    if (target && target.text.trim()) {
+      mirrorDailyMutationToSyncedGoals(activeDailyPlan.dateKey, {
+        type: 'status',
+        entry: target,
+        status: 'missed',
+      });
+    }
     playCueSound('goal_carryover');
     pushFloating('Saved to history for tomorrow', 'amber');
   };
 
   const handleDailyRestoreEntry = (kind: 'priority' | 'todo', entryId: string) => {
+    const list = kind === 'priority' ? activeDailyPlan.priorities : activeDailyPlan.todos;
+    const target = list.find((e) => e.id === entryId);
+
     onUpdateDailyPlan((prev) => {
       const listKey = kind === 'priority' ? 'priorities' : 'todos';
       return {
@@ -1180,9 +1738,17 @@ export function GoalsView({
         ),
       };
     });
+    if (target && target.text.trim()) {
+      mirrorDailyMutationToSyncedGoals(activeDailyPlan.dateKey, {
+        type: 'status',
+        entry: target,
+        status: 'pending',
+      });
+    }
   };
 
   const handleDailyReschedulePriority = (entryId: string, nextDeadline: PriorityDeadline) => {
+    const target = activeDailyPlan.priorities.find((p) => p.id === entryId);
     onUpdateDailyPlan((prev) => ({
       ...prev,
       updatedAt: Date.now(),
@@ -1197,7 +1763,171 @@ export function GoalsView({
           : item
       ),
     }));
+    if (target && target.text.trim()) {
+      mirrorDailyMutationToSyncedGoals(activeDailyPlan.dateKey, {
+        type: 'status',
+        entry: target,
+        status: 'pending',
+        deadline: nextDeadline,
+      });
+    }
     showNotice('Priority deadline updated for today.');
+  };
+
+  // ============================================================================
+  // Move (Next Day / Custom Date) & Multi-Date Selective Copy Handlers
+  // ============================================================================
+
+  const cloneEntryForDate = (entry: GoalTaskEntry, targetDateKey: string): GoalTaskEntry => ({
+    id: makeId(entry.kind === 'priority' ? 'pri' : 'todo'),
+    kind: entry.kind,
+    text: entry.text.trim(),
+    status: 'pending',
+    ...(entry.kind === 'priority' && entry.deadline
+      ? { deadline: computeDueTimestampForDeadline(entry.deadline, targetDateKey) }
+      : {}),
+  });
+
+  const upsertEntriesIntoScheduledDates = (
+    dateKeys: string[],
+    entry: GoalTaskEntry,
+    alsoUpdateGoals: boolean
+  ) => {
+    if (!entry.text.trim() || dateKeys.length === 0) return;
+    const cleanTextLower = entry.text.trim().toLowerCase();
+
+    const futureDates = dateKeys.filter((dk) => dk > activeDailyPlan.dateKey);
+    const includesToday = dateKeys.some((dk) => dk === activeDailyPlan.dateKey);
+
+    if (includesToday) {
+      const cloned = cloneEntryForDate(entry, activeDailyPlan.dateKey);
+      onUpdateDailyPlan((prev) => {
+        const listKey = entry.kind === 'priority' ? 'priorities' : 'todos';
+        const list = [...prev[listKey]];
+        if (list.some((x) => x.text.trim().toLowerCase() === cleanTextLower)) return prev;
+        const emptyIdx = list.findIndex((x) => !x.text.trim());
+        if (emptyIdx !== -1) list[emptyIdx] = cloned;
+        else list.push(cloned);
+        return { ...prev, [listKey]: list, updatedAt: Date.now() };
+      });
+    }
+
+    if (futureDates.length > 0) {
+      onUpdateScheduledDailyPlans((prev) => {
+        const next = { ...prev };
+        for (const dk of futureDates) {
+          const existing: DailyPlanRecord = next[dk] ?? {
+            dateKey: dk,
+            priorities: [],
+            todos: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+          const listKey = entry.kind === 'priority' ? 'priorities' : 'todos';
+          const list = [...existing[listKey]];
+          if (!list.some((x) => x.text.trim().toLowerCase() === cleanTextLower)) {
+            list.push(cloneEntryForDate(entry, dk));
+            next[dk] = {
+              ...existing,
+              [listKey]: list,
+              updatedAt: Date.now(),
+            };
+          }
+        }
+        return next;
+      });
+    }
+
+    if (alsoUpdateGoals && isAutoSyncOn && syncedGoalIdSet.size > 0) {
+      onUpdateGoals((prevGoals) =>
+        prevGoals.map((goal) => {
+          if (!syncedGoalIdSet.has(goal.id)) return goal;
+          let changedGoal = false;
+          const nextSteps = [...goal.steps];
+          for (const dk of dateKeys) {
+            const idx = resolveMatchingStepIndexForDate(goal, dk);
+            if (idx === -1) continue;
+            const listKey = entry.kind === 'priority' ? 'priorities' : 'todos';
+            const baseList = [...(nextSteps[idx][listKey] ?? [makeEmptyEntry(entry.kind)])];
+            if (baseList.some((x) => x.text.trim().toLowerCase() === cleanTextLower)) continue;
+            const cloned = cloneEntryForDate(entry, dk);
+            const emptyIdx = baseList.findIndex((x) => !x.text.trim());
+            if (emptyIdx !== -1) baseList[emptyIdx] = cloned;
+            else baseList.push(cloned);
+            nextSteps[idx] = { ...nextSteps[idx], [listKey]: baseList };
+            changedGoal = true;
+          }
+          return changedGoal ? { ...goal, steps: nextSteps, updatedAt: Date.now() } : goal;
+        })
+      );
+    }
+  };
+
+  const handleMoveDailyEntryToDate = (entry: GoalTaskEntry, targetDateKey: string) => {
+    if (!entry.text.trim() || targetDateKey === activeDailyPlan.dateKey) return;
+    upsertEntriesIntoScheduledDates([targetDateKey], entry, true);
+    handleDailyDeleteEntry(entry.kind, entry.id);
+    playCueSound('goal_carryover');
+    pushFloating(`Moved to ${formatShortDate(targetDateKey) ?? targetDateKey}`, 'amber');
+    showNotice(
+      `Moved "${entry.text.trim()}" to ${formatIsoWithWeekday(targetDateKey) ?? targetDateKey}.`
+    );
+  };
+
+  const handleCopyDailyEntryToDates = (entry: GoalTaskEntry, targetDateKeys: string[]) => {
+    const cleanDates = Array.from(new Set(targetDateKeys)).filter(Boolean).sort();
+    if (!entry.text.trim() || cleanDates.length === 0) return;
+    upsertEntriesIntoScheduledDates(cleanDates, entry, true);
+    playCueSound('goal_tick');
+    pushFloating(`Copied to ${cleanDates.length}d`, 'cyan');
+    showNotice(
+      `Copied "${entry.text.trim()}" to ${cleanDates.length} selected ${cleanDates.length === 1 ? 'date' : 'dates'}.`
+    );
+  };
+
+  const handleBumpScheduledTaskNextDay = (dateKey: string, entry: GoalTaskEntry) => {
+    const nextDate = addDaysToDateKey(dateKey, 1);
+    upsertEntriesIntoScheduledDates([nextDate], entry, true);
+    onUpdateScheduledDailyPlans((prev) => {
+      const existing = prev[dateKey];
+      if (!existing) return prev;
+      const listKey = entry.kind === 'priority' ? 'priorities' : 'todos';
+      const updatedList = existing[listKey].filter((item) => item.id !== entry.id);
+      const next = { ...prev };
+      if (
+        updatedList.length === 0 &&
+        (entry.kind === 'priority' ? existing.todos.length === 0 : existing.priorities.length === 0)
+      ) {
+        delete next[dateKey];
+      } else {
+        next[dateKey] = { ...existing, [listKey]: updatedList, updatedAt: Date.now() };
+      }
+      return next;
+    });
+    showNotice(`Pushed "${entry.text.trim()}" to ${formatIsoWithWeekday(nextDate) ?? nextDate}.`);
+  };
+
+  const handleDeleteScheduledTask = (
+    dateKey: string,
+    kind: 'priority' | 'todo',
+    entryId: string
+  ) => {
+    onUpdateScheduledDailyPlans((prev) => {
+      const existing = prev[dateKey];
+      if (!existing) return prev;
+      const listKey = kind === 'priority' ? 'priorities' : 'todos';
+      const updatedList = existing[listKey].filter((item) => item.id !== entryId);
+      const next = { ...prev };
+      if (
+        updatedList.length === 0 &&
+        (kind === 'priority' ? existing.todos.length === 0 : existing.priorities.length === 0)
+      ) {
+        delete next[dateKey];
+      } else {
+        next[dateKey] = { ...existing, [listKey]: updatedList, updatedAt: Date.now() };
+      }
+      return next;
+    });
   };
 
   const handleImportEntriesToToday = (itemsToImport: Array<{ historyDate: string; entry: GoalTaskEntry }>) => {
@@ -1449,23 +2179,35 @@ export function GoalsView({
     text: string,
     deadline?: PriorityDeadline
   ) => {
+    const stepObj = goal.steps.find((s) => s.stepNumber === stepNumber);
+    const list =
+      kind === 'priority'
+        ? stepObj?.priorities ?? []
+        : stepObj?.todos ?? [];
+    const existing = list.find((item) => item.id === entryId);
+    const prevText = existing?.text ?? '';
+    const sharedSyncKey =
+      existing?.syncKey ??
+      `goal:${goal.id}:s${stepNumber}:${kind === 'priority' ? 'pri' : 'todo'}:${entryId}`;
+    const updatedEntry: GoalTaskEntry = {
+      id: entryId,
+      kind,
+      text,
+      status: existing && existing.status !== 'empty' ? existing.status : 'pending',
+      ...(kind === 'priority' ? { deadline } : {}),
+      syncKey: sharedSyncKey,
+    };
+
     updateGoalById(goal.id, (g) => ({
       ...g,
       steps: g.steps.map((s) => {
         if (s.stepNumber !== stepNumber) return s;
-        const list =
+        const curList =
           kind === 'priority'
             ? [...(s.priorities ?? [makeEmptyEntry('priority')])]
             : [...(s.todos ?? [makeEmptyEntry('todo'), makeEmptyEntry('todo'), makeEmptyEntry('todo')])];
-        const updatedList = list.map((item) =>
-          item.id === entryId
-            ? {
-                ...item,
-                text,
-                status: item.status === 'empty' ? ('pending' as const) : item.status,
-                ...(kind === 'priority' ? { deadline } : {}),
-              }
-            : item
+        const updatedList = curList.map((item) =>
+          item.id === entryId ? updatedEntry : item
         );
         return {
           ...s,
@@ -1474,6 +2216,12 @@ export function GoalsView({
         };
       }),
     }));
+
+    mirrorGoalStepMutationToDaily(goal, stepNumber, {
+      type: 'upsert',
+      entry: updatedEntry,
+      prevText,
+    });
   };
 
   const handleStepDeleteEntry = (
@@ -1482,6 +2230,11 @@ export function GoalsView({
     kind: 'priority' | 'todo',
     entryId: string
   ) => {
+    const stepObj = goal.steps.find((s) => s.stepNumber === stepNumber);
+    const target = (kind === 'priority' ? stepObj?.priorities : stepObj?.todos)?.find(
+      (item) => item.id === entryId
+    );
+
     updateGoalById(goal.id, (g) => ({
       ...g,
       steps: g.steps.map((s) => {
@@ -1499,6 +2252,13 @@ export function GoalsView({
         };
       }),
     }));
+
+    if (target && target.text.trim()) {
+      mirrorGoalStepMutationToDaily(goal, stepNumber, {
+        type: 'delete',
+        entry: target,
+      });
+    }
   };
 
   const handleStepAddSlot = (goal: GoalPlan, stepNumber: number, kind: 'priority' | 'todo') => {
@@ -1529,6 +2289,7 @@ export function GoalsView({
     const target = list.find((e) => e.id === entryId);
     if (!target || !target.text.trim()) return;
     const wasDone = target.status === 'done';
+    const nextStatus: 'pending' | 'done' = wasDone ? 'pending' : 'done';
 
     const updatedGoal: GoalPlan = {
       ...goal,
@@ -1539,7 +2300,7 @@ export function GoalsView({
           item.id === entryId
             ? {
                 ...item,
-                status: wasDone ? ('pending' as const) : ('done' as const),
+                status: nextStatus,
                 completedAt: wasDone ? undefined : Date.now(),
                 missedAt: undefined,
               }
@@ -1554,6 +2315,11 @@ export function GoalsView({
     };
 
     updateGoalById(goal.id, () => updatedGoal);
+    mirrorGoalStepMutationToDaily(goal, stepNumber, {
+      type: 'status',
+      entry: target,
+      status: nextStatus,
+    });
     if (!wasDone) {
       awardCompletionRewards(kind === 'priority' ? 55 : 35, false, updatedGoal);
     }
@@ -1614,6 +2380,12 @@ export function GoalsView({
       };
     });
 
+    mirrorGoalStepMutationToDaily(goal, stepNumber, {
+      type: 'status',
+      entry: target,
+      status: 'missed',
+    });
+
     const shieldCushioned = gamification.shields > 0 && gamification.combo > 0;
     onUpdateGamification((prev) => {
       if (prev.shields > 0 && prev.combo > 0) {
@@ -1649,6 +2421,11 @@ export function GoalsView({
     kind: 'priority' | 'todo',
     entryId: string
   ) => {
+    const stepObj = goal.steps.find((s) => s.stepNumber === stepNumber);
+    const target = (kind === 'priority' ? stepObj?.priorities : stepObj?.todos)?.find(
+      (item) => item.id === entryId
+    );
+
     updateGoalById(goal.id, (g) => ({
       ...g,
       steps: g.steps.map((s) => {
@@ -1670,6 +2447,14 @@ export function GoalsView({
         };
       }),
     }));
+
+    if (target && target.text.trim()) {
+      mirrorGoalStepMutationToDaily(goal, stepNumber, {
+        type: 'status',
+        entry: target,
+        status: 'pending',
+      });
+    }
   };
 
   const handleStepReschedulePriority = (
@@ -1678,6 +2463,9 @@ export function GoalsView({
     entryId: string,
     nextDeadline: PriorityDeadline
   ) => {
+    const stepObj = goal.steps.find((s) => s.stepNumber === stepNumber);
+    const target = (stepObj?.priorities ?? []).find((item) => item.id === entryId);
+
     updateGoalById(goal.id, (g) => ({
       ...g,
       steps: g.steps.map((s) => {
@@ -1690,6 +2478,128 @@ export function GoalsView({
         };
       }),
     }));
+
+    if (target && target.text.trim()) {
+      mirrorGoalStepMutationToDaily(goal, stepNumber, {
+        type: 'status',
+        entry: target,
+        status: target.status === 'done' ? 'done' : 'pending',
+        deadline: nextDeadline,
+      });
+    }
+  };
+
+  const handleMoveStepEntryToDate = (
+    goal: GoalPlan,
+    stepNumber: number,
+    entry: GoalTaskEntry,
+    targetDateKey: string
+  ) => {
+    if (!entry.text.trim()) return;
+    const cleanLower = entry.text.trim().toLowerCase();
+    const targetStepIdx = resolveMatchingStepIndexForDate(goal, targetDateKey);
+
+    if (targetStepIdx !== -1 && goal.steps[targetStepIdx].stepNumber === stepNumber) {
+      return;
+    }
+
+    if (targetStepIdx !== -1) {
+      const targetStepNum = goal.steps[targetStepIdx].stepNumber;
+      const listKey = entry.kind === 'priority' ? 'priorities' : 'todos';
+      const minSlots = entry.kind === 'priority' ? 1 : 3;
+      const cloned = cloneEntryForDate(entry, targetDateKey);
+
+      updateGoalById(goal.id, (g) => ({
+        ...g,
+        steps: g.steps.map((s) => {
+          if (s.stepNumber === stepNumber) {
+            const filtered = (s[listKey] ?? []).filter((item) => item.id !== entry.id);
+            while (filtered.length < minSlots) filtered.push(makeEmptyEntry(entry.kind));
+            return { ...s, [listKey]: filtered };
+          }
+          if (s.stepNumber === targetStepNum) {
+            const list = [...(s[listKey] ?? [makeEmptyEntry(entry.kind)])];
+            if (!list.some((x) => x.text.trim().toLowerCase() === cleanLower)) {
+              const emptyIdx = list.findIndex((x) => !x.text.trim());
+              if (emptyIdx !== -1) list[emptyIdx] = cloned;
+              else list.push(cloned);
+            }
+            return { ...s, [listKey]: list };
+          }
+          return s;
+        }),
+      }));
+
+      setExpandedSteps((prev) => ({
+        ...prev,
+        [`${goal.id}:${targetStepNum}`]: true,
+      }));
+      mirrorGoalStepMutationToDaily(goal, stepNumber, { type: 'delete', entry });
+      mirrorGoalStepMutationToDaily(goal, targetStepNum, { type: 'upsert', entry: cloned });
+      playCueSound('goal_carryover');
+      showNotice(
+        `Moved "${entry.text.trim()}" to #${targetStepNum} (${formatIsoWithWeekday(targetDateKey) ?? targetDateKey}).`
+      );
+      return;
+    }
+
+    upsertEntriesIntoScheduledDates([targetDateKey], entry, false);
+    handleStepDeleteEntry(goal, stepNumber, entry.kind, entry.id);
+    playCueSound('goal_carryover');
+    showNotice(
+      `Moved "${entry.text.trim()}" to ${formatIsoWithWeekday(targetDateKey) ?? targetDateKey}.`
+    );
+  };
+
+  const handleCopyStepEntryToDates = (
+    goal: GoalPlan,
+    _stepNumber: number,
+    entry: GoalTaskEntry,
+    targetDateKeys: string[]
+  ) => {
+    const cleanDates = Array.from(new Set(targetDateKeys)).filter(Boolean).sort();
+    if (!entry.text.trim() || cleanDates.length === 0) return;
+    const cleanLower = entry.text.trim().toLowerCase();
+
+    const outsideDates: string[] = [];
+    updateGoalById(goal.id, (g) => {
+      const nextSteps = [...g.steps];
+      let touched = false;
+      for (const dk of cleanDates) {
+        const idx = resolveMatchingStepIndexForDate(g, dk);
+        if (idx === -1) {
+          outsideDates.push(dk);
+          continue;
+        }
+        const listKey = entry.kind === 'priority' ? 'priorities' : 'todos';
+        const baseList = [...(nextSteps[idx][listKey] ?? [makeEmptyEntry(entry.kind)])];
+        if (!baseList.some((x) => x.text.trim().toLowerCase() === cleanLower)) {
+          const emptyIdx = baseList.findIndex((x) => !x.text.trim());
+          const cloned = cloneEntryForDate(entry, dk);
+          if (emptyIdx !== -1) baseList[emptyIdx] = cloned;
+          else baseList.push(cloned);
+          nextSteps[idx] = { ...nextSteps[idx], [listKey]: baseList };
+          touched = true;
+        }
+      }
+      return touched ? { ...g, steps: nextSteps } : g;
+    });
+
+    if (outsideDates.length > 0 || cleanDates.includes(activeDailyPlan.dateKey)) {
+      const extraDates = cleanDates.filter((dk) => {
+        const idx = resolveMatchingStepIndexForDate(goal, dk);
+        return idx === -1 || (dk === activeDailyPlan.dateKey && syncedGoalIdSet.has(goal.id));
+      });
+      if (extraDates.length > 0) {
+        upsertEntriesIntoScheduledDates(extraDates, entry, false);
+      }
+    }
+
+    playCueSound('goal_tick');
+    pushFloating(`Copied to ${cleanDates.length}d`, 'cyan');
+    showNotice(
+      `Copied "${entry.text.trim()}" to ${cleanDates.length} selected ${cleanDates.length === 1 ? 'date' : 'dates'}.`
+    );
   };
 
   const handleTickCarryover = (
@@ -1979,6 +2889,115 @@ export function GoalsView({
     setShowCycleTable(true);
     playCueSound('goal_tick');
     showNotice('Created 28-day Monthly Phases tracker (Days 1–6 Menstrual).');
+  };
+
+  const cycleAnalytics = useMemo(
+    () =>
+      deriveCycleStatsFromLogs(
+        activeGoal?.cadence === 'phase' ? activeGoal : null,
+        cycleLogs
+      ),
+    [activeGoal, cycleLogs]
+  );
+
+  const handleRecalculatePhasesFromPreviousCycle = (goal: GoalPlan) => {
+    if (goal.cadence !== 'phase') return;
+    const stats = deriveCycleStatsFromLogs(goal, cycleLogs);
+    const total = stats.detectedCycleDays;
+    const periodLen = stats.detectedPeriodDays;
+    const anchor =
+      goal.steps[0]?.dateLabel ??
+      goal.phaseConfig?.cycleDates?.[goal.phaseConfig.cycleDates.length - 1] ??
+      goal.startDate ??
+      todayIso;
+
+    updateGoalById(goal.id, (g) => {
+      const nextSteps: GoalStep[] = Array.from({ length: total }, (_, idx) => {
+        const existing = g.steps[idx];
+        const stepNum = idx + 1;
+        const dateLabel = existing?.dateLabel ?? addDaysToIso(anchor, idx);
+        const phase = computeCyclePhaseForDay(stepNum, total, periodLen);
+        if (existing) {
+          return {
+            ...existing,
+            stepNumber: stepNum,
+            dateLabel,
+            monthKey: dateLabel.slice(0, 7),
+            phase,
+          };
+        }
+        return createFreshStep(stepNum, {
+          dateLabel,
+          monthKey: dateLabel.slice(0, 7),
+          phase,
+        });
+      });
+
+      return {
+        ...g,
+        totalSteps: nextSteps.length,
+        startDate: nextSteps[0]?.dateLabel ?? g.startDate,
+        endDate: nextSteps[nextSteps.length - 1]?.dateLabel ?? g.endDate,
+        phaseConfig: {
+          cycleDates: stats.episodes.length > 0
+            ? stats.episodes.map((e) => e.startDate)
+            : g.phaseConfig?.cycleDates ?? [anchor],
+          periodLengthDays: periodLen,
+          averageCycleDays: total,
+          dataMode: g.phaseConfig?.dataMode ?? '3months',
+        },
+        steps: nextSteps,
+      };
+    });
+    playCueSound('goal_tick');
+    showNotice(
+      `Recalculated phases from previous cycle (${total}d cycle, ${periodLen}d menstrual).`
+    );
+  };
+
+  const handleAddNextMonthPredictedCycle = (goal: GoalPlan) => {
+    if (goal.cadence !== 'phase') return;
+    const stats = deriveCycleStatsFromLogs(goal, cycleLogs);
+    const cycleLen = stats.detectedCycleDays;
+    const periodLen = stats.detectedPeriodDays;
+    const lastExistingDate =
+      resolveStepDateIso(goal, goal.steps[goal.steps.length - 1]) ??
+      goal.endDate ??
+      todayIso;
+    const startNextIso = addDaysToIso(lastExistingDate, 1);
+
+    updateGoalById(goal.id, (g) => {
+      const startNum = g.steps.length + 1;
+      const appended: GoalStep[] = Array.from({ length: cycleLen }, (_, idx) => {
+        const dateLabel = addDaysToIso(startNextIso, idx);
+        const phase = computeCyclePhaseForDay(idx + 1, cycleLen, periodLen);
+        return createFreshStep(startNum + idx, {
+          dateLabel,
+          monthKey: dateLabel.slice(0, 7),
+          phase,
+        });
+      });
+      const combined = [...g.steps, ...appended];
+      const existingStarts = g.phaseConfig?.cycleDates ?? [];
+      return {
+        ...g,
+        totalSteps: combined.length,
+        endDate: combined[combined.length - 1]?.dateLabel ?? g.endDate,
+        phaseConfig: {
+          cycleDates: Array.from(new Set([...existingStarts, startNextIso])).sort((a, b) =>
+            a.localeCompare(b)
+          ),
+          periodLengthDays: periodLen,
+          averageCycleDays: cycleLen,
+          dataMode: g.phaseConfig?.dataMode ?? '3months',
+        },
+        steps: combined,
+      };
+    });
+    playCueSound('goal_tick');
+    showNotice(
+      `Added next month cycle (${cycleLen}d · ${periodLen}d menstrual starting ${formatIsoWithWeekday(startNextIso) ?? startNextIso}).`
+    );
   };
 
   const handleSmartSplit = (e: React.FormEvent) => {
@@ -2856,7 +3875,28 @@ export function GoalsView({
               {goals.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => setShowGoalImportDrawer((v) => !v)}
+                  onClick={() => {
+                    setShowGoalSyncDrawer((v) => !v);
+                    setShowGoalImportDrawer(false);
+                  }}
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    showGoalSyncDrawer || (isAutoSyncOn && syncedGoalIdSet.size > 0)
+                      ? 'bio-glow-chip'
+                      : 'border-cyan-200/20 bg-cyan-400/[0.06] text-cyan-100 hover:border-cyan-300/45'
+                  }`}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Sync Goals ({syncedGoalIdSet.size})
+                </button>
+              )}
+
+              {goals.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowGoalImportDrawer((v) => !v);
+                    setShowGoalSyncDrawer(false);
+                  }}
                   className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                     showGoalImportDrawer
                       ? 'bio-glow-chip'
@@ -2864,9 +3904,22 @@ export function GoalsView({
                   }`}
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Import from Goals / Phases
+                  Import Goals
                 </button>
               )}
+
+              <button
+                type="button"
+                onClick={() => setShowScheduledDays((v) => !v)}
+                className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                  showScheduledDays
+                    ? 'bio-glow-chip'
+                    : 'border-cyan-200/20 bg-cyan-400/[0.06] text-cyan-100 hover:border-cyan-300/45'
+                }`}
+              >
+                <Calendar className="h-3.5 w-3.5" />
+                Upcoming ({Object.keys(scheduledDailyPlans).filter((d) => d > activeDailyPlan.dateKey).length})
+              </button>
 
               <button
                 type="button"
@@ -2878,7 +3931,7 @@ export function GoalsView({
                 }`}
               >
                 <History className="h-3.5 w-3.5" />
-                Past Days History ({dailyHistory.length})
+                Past Days ({dailyHistory.length})
               </button>
 
               {dailySavedCount.total > 0 && (
@@ -2894,7 +3947,7 @@ export function GoalsView({
                       const others = prev.filter((h) => h.dateKey !== snapshot.dateKey);
                       return [snapshot, ...others].slice(0, 60);
                     });
-                    onUpdateDailyPlan(() => ({
+                    onUpdateDailyPlan((prev) => ({
                       dateKey: todayIso,
                       priorities: [
                         makeEmptyEntry('priority'),
@@ -2909,6 +3962,8 @@ export function GoalsView({
                         makeEmptyEntry('todo'),
                       ],
                       dismissedImportBanner: false,
+                      syncedGoalIds: prev.syncedGoalIds ?? [],
+                      autoSyncGoals: prev.autoSyncGoals ?? true,
                       createdAt: Date.now(),
                       updatedAt: Date.now(),
                     }));
@@ -2922,6 +3977,184 @@ export function GoalsView({
               )}
             </div>
           </div>
+
+          {/* Live Bidirectional Sync Goals Drawer */}
+          {showGoalSyncDrawer && goals.length > 0 && (
+            <div className="space-y-3 rounded-xl border border-cyan-300/35 bg-[#04111b]/85 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-200">
+                    <Link2 className="h-3.5 w-3.5" />
+                    Auto-Sync Today&apos;s Daily Plan with Any Goals
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-slate-400">
+                    When enabled, tasks for each date in synced Goals load into Daily automatically, and changes here mirror straight back to your Goal!
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleToggleAutoSyncGoals}
+                    className={`cursor-pointer rounded-lg border px-3 py-1 text-xs font-semibold ${
+                      isAutoSyncOn
+                        ? 'border-emerald-300/55 bg-emerald-400/20 text-emerald-100'
+                        : 'border-slate-500/35 bg-slate-900/60 text-slate-300'
+                    }`}
+                  >
+                    Auto-Sync: {isAutoSyncOn ? 'ON' : 'OFF'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowGoalSyncDrawer(false)}
+                    className="cursor-pointer text-xs text-slate-400 hover:text-slate-100"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {goals.map((g) => {
+                  const isSynced = syncedGoalIdSet.has(g.id);
+                  const stepIdx = resolveMatchingStepIndexForDate(g, activeDailyPlan.dateKey);
+                  const matchStep = stepIdx !== -1 ? g.steps[stepIdx] : null;
+                  const matchTaskCount = matchStep
+                    ? (matchStep.priorities ?? []).filter((p) => p.text.trim()).length +
+                      (matchStep.todos ?? []).filter((t) => t.text.trim()).length
+                    : 0;
+
+                  return (
+                    <button
+                      key={g.id}
+                      type="button"
+                      onClick={() => handleToggleGoalSync(g.id)}
+                      className={`flex cursor-pointer items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs transition ${
+                        isSynced
+                          ? 'bio-glow-chip'
+                          : 'border-cyan-200/15 bg-slate-950/60 text-slate-300 hover:border-cyan-300/40'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold text-slate-100">{g.title}</p>
+                        <p className="text-[11px] text-slate-400">
+                          {matchStep
+                            ? `Step #${matchStep.stepNumber} today (${matchTaskCount} tasks)`
+                            : `Future / ${g.cadence} steps`}
+                        </p>
+                      </div>
+                      <span
+                        className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold ${
+                          isSynced
+                            ? 'bg-cyan-400/25 text-cyan-100'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {isSynced ? 'Synced' : 'Sync'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Upcoming Scheduled Days Drawer */}
+          {showScheduledDays && (
+            <div className="space-y-3 rounded-xl border border-cyan-300/30 bg-[#04111b]/85 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-cyan-200">
+                  Upcoming Scheduled Days (Auto-appears on each date)
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowScheduledDays(false)}
+                  className="cursor-pointer text-xs text-slate-400 hover:text-slate-100"
+                >
+                  Close
+                </button>
+              </div>
+
+              {(() => {
+                const futureKeys = Object.keys(scheduledDailyPlans)
+                  .filter((dk) => dk > activeDailyPlan.dateKey)
+                  .sort((a, b) => a.localeCompare(b));
+                if (futureKeys.length === 0) {
+                  return (
+                    <p className="text-xs text-slate-400">
+                      No tasks moved or copied to future dates yet. Use the &ldquo;Next Day&rdquo;, Calendar Move, or Copy buttons on any task below!
+                    </p>
+                  );
+                }
+                return (
+                  <div className="max-h-72 space-y-2.5 overflow-y-auto quiet-scroll">
+                    {futureKeys.map((dk) => {
+                      const plan = scheduledDailyPlans[dk];
+                      const entries = [
+                        ...(plan?.priorities ?? []).filter((p) => p.text.trim()),
+                        ...(plan?.todos ?? []).filter((t) => t.text.trim()),
+                      ];
+                      if (entries.length === 0) return null;
+                      return (
+                        <div
+                          key={dk}
+                          className="rounded-xl border border-cyan-200/15 bg-slate-950/60 p-3"
+                        >
+                          <div className="mb-2 flex items-center justify-between text-xs">
+                            <span className="font-semibold text-cyan-100">
+                              {formatIsoWithWeekday(dk) ?? dk} ({dk})
+                            </span>
+                            <span className="font-mono-tabular text-[11px] text-slate-400">
+                              {entries.length} {entries.length === 1 ? 'task' : 'tasks'}
+                            </span>
+                          </div>
+                          <div className="space-y-1.5">
+                            {entries.map((item) => (
+                              <div
+                                key={item.id}
+                                className="flex items-center justify-between gap-2 rounded-lg border border-cyan-200/[0.08] bg-slate-900/50 px-2.5 py-1.5 text-xs"
+                              >
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span
+                                    className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                      item.kind === 'priority'
+                                        ? 'bg-amber-400/20 text-amber-200'
+                                        : 'bg-cyan-400/15 text-cyan-200'
+                                    }`}
+                                  >
+                                    {item.kind === 'priority' ? 'Priority' : 'To-Do'}
+                                  </span>
+                                  <span className="truncate text-slate-100">{item.text}</span>
+                                </div>
+                                <div className="flex shrink-0 items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleBumpScheduledTaskNextDay(dk, item)}
+                                    title="Push forward +1 day"
+                                    className="flex cursor-pointer items-center gap-1 rounded border border-cyan-300/25 bg-cyan-400/10 px-2 py-0.5 text-[11px] text-cyan-100 hover:bg-cyan-400/20"
+                                  >
+                                    <ArrowRight className="h-3 w-3" /> +1d
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteScheduledTask(dk, item.kind, item.id)}
+                                    aria-label="Delete scheduled task"
+                                    className="cursor-pointer rounded p-1 text-slate-400 hover:bg-rose-500/15 hover:text-rose-200"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
 
           {/* Unfinished Tasks Import Notification Banner */}
           {unfinishedImportPool.length > 0 && !activeDailyPlan.dismissedImportBanner && (
@@ -3317,6 +4550,8 @@ export function GoalsView({
             onMissEntry={handleDailyMissEntry}
             onRestoreEntry={handleDailyRestoreEntry}
             onReschedulePriority={handleDailyReschedulePriority}
+            onMoveEntryToDate={handleMoveDailyEntryToDate}
+            onCopyEntryToDates={handleCopyDailyEntryToDates}
             missTooltip="Cut off & save to history for tomorrow"
           />
         </section>
@@ -3920,6 +5155,19 @@ export function GoalsView({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
+                  onClick={() => handleToggleGoalSync(activeGoal.id)}
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    syncedGoalIdSet.has(activeGoal.id)
+                      ? 'bio-glow-chip'
+                      : 'border-cyan-200/20 bg-cyan-400/[0.06] text-cyan-100 hover:border-cyan-300/45'
+                  }`}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  {syncedGoalIdSet.has(activeGoal.id) ? 'Synced w/ Daily' : 'Sync w/ Daily'}
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setShowSplitter((v) => !v)}
                   className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-cyan-200/20 bg-cyan-400/[0.06] px-3 py-1.5 text-xs font-medium text-cyan-100 hover:border-cyan-300/45"
                 >
@@ -4195,6 +5443,24 @@ export function GoalsView({
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
+                      onClick={() => handleRecalculatePhasesFromPreviousCycle(activeGoal)}
+                      className="flex cursor-pointer items-center gap-1 rounded-lg border border-cyan-300/40 bg-cyan-400/12 px-2.5 py-1 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-400/22"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Recalculate from Previous Cycle
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleAddNextMonthPredictedCycle(activeGoal)}
+                      className="flex cursor-pointer items-center gap-1 rounded-lg border border-amber-300/40 bg-amber-400/12 px-2.5 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-400/22"
+                    >
+                      <Plus className="h-3 w-3" />
+                      Add Next Month (w/ Dates)
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => handleStartNewCycleToday(activeGoal)}
                       className="flex cursor-pointer items-center gap-1 rounded-lg border border-rose-300/40 bg-rose-400/15 px-2.5 py-1 text-[11px] font-semibold text-rose-100 hover:bg-rose-400/25"
                     >
@@ -4221,38 +5487,89 @@ export function GoalsView({
                   </div>
                 </div>
 
-                {/* Structured 4-Phase Range Cards */}
-                <div className="mt-3 grid grid-cols-2 gap-2.5 lg:grid-cols-4">
-                  {(
-                    [
-                      { key: 'menstrual', range: breakdown.menstrual, tag: 'Confirmed Bleed' },
-                      { key: 'follicular', range: breakdown.follicular, tag: 'Rising Focus' },
-                      { key: 'ovulation', range: breakdown.ovulation, tag: 'Peak Clarity' },
-                      { key: 'luteal', range: breakdown.luteal, tag: 'Calm Review' },
-                    ] as const
-                  ).map((item) => {
-                    const meta = PHASE_META[item.key];
-                    return (
-                      <div
-                        key={item.key}
-                        className={`rounded-lg border px-3 py-2 text-xs ${meta.chipClass}`}
-                      >
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="font-semibold">{meta.label}</span>
-                          <span className="font-mono-tabular font-bold">
-                            Days {item.range.start}–{item.range.end}
-                          </span>
-                        </div>
-                        <p className="mt-0.5 text-[10px] opacity-85">
-                          {item.tag} · {meta.energy}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
-
                 {showCycleTable && (
-                  <div className="mt-3.5 max-h-80 overflow-auto rounded-lg border border-cyan-200/15 bg-slate-950/65 quiet-scroll">
+                  <>
+                    {/* Previous Month Data & Predicted Next Cycle Strip */}
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cyan-200/15 bg-slate-950/55 px-3 py-2 text-[11px] text-slate-300">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-cyan-200">
+                          Previous Month Data:
+                        </span>
+                        <span>
+                          Cycle{' '}
+                          <strong className="font-mono-tabular text-slate-100">
+                            {cycleAnalytics.detectedCycleDays}d
+                          </strong>
+                          {cycleAnalytics.previousCycleDays !== null && ' (logged)'}
+                        </span>
+                        <span>·</span>
+                        <span>
+                          Menstruation{' '}
+                          <strong className="font-mono-tabular text-rose-200">
+                            {cycleAnalytics.detectedPeriodDays}d
+                          </strong>
+                          {cycleAnalytics.previousPeriodDays !== null && ' (logged)'}
+                        </span>
+                      </div>
+                      {cycleAnalytics.nextPredictedStart && (
+                        <span className="font-mono-tabular text-amber-200">
+                          Predicted next Day 1:{' '}
+                          <strong>
+                            {formatIsoWithWeekday(cycleAnalytics.nextPredictedStart) ??
+                              cycleAnalytics.nextPredictedStart}
+                          </strong>
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Structured 4-Phase Range Cards (with Real Calendar Dates) */}
+                    <div className="mt-3 grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+                      {(
+                        [
+                          { key: 'menstrual', range: breakdown.menstrual, tag: 'Confirmed Bleed' },
+                          { key: 'follicular', range: breakdown.follicular, tag: 'Rising Focus' },
+                          { key: 'ovulation', range: breakdown.ovulation, tag: 'Peak Clarity' },
+                          { key: 'luteal', range: breakdown.luteal, tag: 'Calm Review' },
+                        ] as const
+                      ).map((item) => {
+                        const meta = PHASE_META[item.key];
+                        const firstStep = activeGoal.steps[item.range.start - 1];
+                        const lastStep = activeGoal.steps[item.range.end - 1];
+                        const startIso = firstStep
+                          ? resolveStepDateIso(activeGoal, firstStep)
+                          : undefined;
+                        const endIso = lastStep
+                          ? resolveStepDateIso(activeGoal, lastStep)
+                          : undefined;
+                        const dateRangeLabel =
+                          startIso && endIso
+                            ? `${formatShortDate(startIso) ?? startIso} – ${formatShortDate(endIso) ?? endIso}`
+                            : null;
+                        return (
+                          <div
+                            key={item.key}
+                            className={`rounded-lg border px-3 py-2 text-xs ${meta.chipClass}`}
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-semibold">{meta.label}</span>
+                              <span className="font-mono-tabular font-bold">
+                                Days {item.range.start}–{item.range.end}
+                              </span>
+                            </div>
+                            {dateRangeLabel && (
+                              <p className="font-mono-tabular mt-0.5 text-[11px] font-medium opacity-95">
+                                {dateRangeLabel}
+                              </p>
+                            )}
+                            <p className="mt-0.5 text-[10px] opacity-85">
+                              {item.tag} · {meta.energy}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-3.5 max-h-80 overflow-auto rounded-lg border border-cyan-200/15 bg-slate-950/65 quiet-scroll">
                     <table className="w-full border-collapse text-left text-xs">
                       <thead className="sticky top-0 z-10 bg-[#051624] text-[11px] text-slate-300 shadow-sm">
                         <tr className="border-b border-cyan-200/15">
@@ -4265,7 +5582,7 @@ export function GoalsView({
                       </thead>
                       <tbody className="divide-y divide-cyan-200/[0.08]">
                         {activeGoal.steps.map((step) => {
-                          const dateKey = step.dateLabel;
+                          const dateKey = resolveStepDateIso(activeGoal, step);
                           const log = dateKey ? cycleLogs[dateKey] : undefined;
                           const isCurrentDay =
                             step.stepNumber === challengeDayInfo.currentStepNumber;
@@ -4289,7 +5606,7 @@ export function GoalsView({
                                 )}
                               </td>
                               <td className="font-mono-tabular whitespace-nowrap px-3 py-1.5 text-slate-300">
-                                {formatShortDate(dateKey) ?? `Cycle +${step.stepNumber - 1}`}
+                                {formatIsoWithWeekday(dateKey) ?? dateKey ?? `Cycle +${step.stepNumber - 1}`}
                               </td>
                               <td className="px-3 py-1.5">
                                 <select
@@ -4369,6 +5686,7 @@ export function GoalsView({
                       </tbody>
                     </table>
                   </div>
+                  </>
                 )}
               </div>
             );
@@ -4573,7 +5891,9 @@ export function GoalsView({
               const isExpanded =
                 expandedSteps[stepExpandKey] ?? (isTodayStep || idx === 0);
 
-              const formattedDate = formatShortDate(step.dateLabel);
+              const stepIso = resolveStepDateIso(activeGoal, step);
+              const formattedDate =
+                formatIsoWithWeekday(stepIso) ?? formatShortDate(stepIso);
               const phaseMeta = step.phase ? PHASE_META[step.phase] : null;
               const nextStepNum = activeGoal.steps[step.stepNumber]?.stepNumber;
               const isDropActive = dragOverStep === step.stepNumber;
@@ -4742,10 +6062,10 @@ export function GoalsView({
                             minPriorities={1}
                             minTodos={3}
                             isToday={
-                              Boolean(step.dateLabel && step.dateLabel === todayIso) ||
+                              Boolean(stepIso && stepIso === todayIso) ||
                               isTodayStep
                             }
-                            referenceDateKey={step.dateLabel ?? todayIso}
+                            referenceDateKey={stepIso ?? todayIso}
                             nowMs={nowMs}
                             allowTomorrowPush={false}
                             onSaveEntry={(kind, entryId, text, deadline) =>
@@ -4779,6 +6099,22 @@ export function GoalsView({
                                 step.stepNumber,
                                 entryId,
                                 nextDeadline
+                              )
+                            }
+                            onMoveEntryToDate={(entry, targetDateKey) =>
+                              handleMoveStepEntryToDate(
+                                activeGoal,
+                                step.stepNumber,
+                                entry,
+                                targetDateKey
+                              )
+                            }
+                            onCopyEntryToDates={(entry, targetDateKeys) =>
+                              handleCopyStepEntryToDates(
+                                activeGoal,
+                                step.stepNumber,
+                                entry,
+                                targetDateKeys
                               )
                             }
                             missTooltip={

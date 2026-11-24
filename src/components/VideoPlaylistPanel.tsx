@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
+  Check,
   ChevronLeft,
   ChevronRight,
   Film,
   ListVideo,
   Pause,
+  Pencil,
   Play,
   Plus,
   Scissors,
@@ -15,9 +17,11 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import type { PlaylistItem, SharedVideoState } from '../types';
+import type { PlaylistItem, SharedVideoState, VideoPlaylistGroup } from '../types';
 
 interface VideoPlaylistPanelProps {
+  playlists: VideoPlaylistGroup[];
+  activePlaylistId: string | null;
   playlist: PlaylistItem[];
   activeVideoId: string | null;
   trimIntroSeconds: number;
@@ -25,6 +29,10 @@ interface VideoPlaylistPanelProps {
   inSharedRoom: boolean;
   watchTogether: boolean;
   remoteVideoState: SharedVideoState | null;
+  onSelectPlaylist: (playlistId: string) => void;
+  onCreatePlaylist: (title: string) => void;
+  onRenamePlaylist: (playlistId: string, title: string) => void;
+  onDeletePlaylist: (playlistId: string) => void;
   onToggleWatchTogether: () => void;
   onSelectVideo: (videoId: string) => void;
   onAddVideo: (item: Omit<PlaylistItem, 'id' | 'addedAt'>) => void;
@@ -146,6 +154,8 @@ function formatSecLabel(sec: number): string {
 }
 
 export function VideoPlaylistPanel({
+  playlists,
+  activePlaylistId,
   playlist,
   activeVideoId,
   trimIntroSeconds,
@@ -153,6 +163,10 @@ export function VideoPlaylistPanel({
   inSharedRoom,
   watchTogether,
   remoteVideoState,
+  onSelectPlaylist,
+  onCreatePlaylist,
+  onRenamePlaylist,
+  onDeletePlaylist,
   onToggleWatchTogether,
   onSelectVideo,
   onAddVideo,
@@ -169,6 +183,10 @@ export function VideoPlaylistPanel({
   const [isTrimOpen, setIsTrimOpen] = useState(false);
   const [isImportingPlaylist, setIsImportingPlaylist] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const [creatingPlaylist, setCreatingPlaylist] = useState(false);
+  const [newPlaylistTitle, setNewPlaylistTitle] = useState('');
+  const [editingPlaylistId, setEditingPlaylistId] = useState<string | null>(null);
+  const [editingPlaylistTitle, setEditingPlaylistTitle] = useState('');
 
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const ytHostRef = useRef<HTMLDivElement | null>(null);
@@ -606,16 +624,37 @@ export function VideoPlaylistPanel({
   const outroSec = trimOutroSeconds % 60;
   const hasTrim = trimIntroSeconds > 0 || trimOutroSeconds > 0;
 
+  const activePlaylist =
+    playlists.find((g) => g.id === activePlaylistId) ?? playlists[0] ?? null;
+
+  const submitNewPlaylist = (e: React.FormEvent) => {
+    e.preventDefault();
+    const title = newPlaylistTitle.trim();
+    if (!title) return;
+    onCreatePlaylist(title);
+    setNewPlaylistTitle('');
+    setCreatingPlaylist(false);
+  };
+
+  const commitRenamePlaylist = (id: string) => {
+    const clean = editingPlaylistTitle.trim();
+    if (clean) {
+      onRenamePlaylist(id, clean);
+    }
+    setEditingPlaylistId(null);
+    setEditingPlaylistTitle('');
+  };
+
   return (
     <section
       aria-label="Study Video Player and Playlist"
-      className="glass-panel relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl"
+      className="glass-panel relative flex min-h-[430px] sm:min-h-[480px] lg:min-h-0 flex-1 flex-col overflow-hidden rounded-xl"
     >
-      {/* Slim Single-Row Header: Quick Prev/Next + Title + Trim Intro/Outro + Playlist Drawer Toggle */}
+      {/* Slim Header: Quick Prev/Next + Title + Trim Intro/Outro + Playlist Drawer Toggle */}
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-cyan-200/[0.08] px-3.5 py-1.5">
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
           {(playlist.length > 1 || effectiveVideo?.sourceType === 'youtube_playlist') && (
-            <div className="flex items-center gap-0.5 shrink-0">
+            <div className="flex shrink-0 items-center gap-0.5">
               <button
                 type="button"
                 onClick={() => handleStepVideo(-1)}
@@ -637,18 +676,18 @@ export function VideoPlaylistPanel({
             </div>
           )}
 
-          <Film className="h-3.5 w-3.5 text-cyan-300 shrink-0" />
+          <Film className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
           <span className="truncate text-xs font-medium text-slate-100">
             {effectiveVideo ? effectiveVideo.title : 'No video selected'}
           </span>
           {activeIdx >= 0 && playlist.length > 0 && (
-            <span className="font-mono-tabular text-[11px] text-slate-400 shrink-0">
+            <span className="font-mono-tabular shrink-0 text-[11px] text-slate-400">
               ({activeIdx + 1}/{playlist.length})
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex shrink-0 items-center gap-1.5">
           {inSharedRoom && (
             <div className="flex items-center rounded-md border border-cyan-200/15 bg-[#040814]/85 p-0.5 text-[11px]">
               <button
@@ -684,8 +723,8 @@ export function VideoPlaylistPanel({
           <button
             type="button"
             onClick={() => setIsTrimOpen((v) => !v)}
-            title="Automatically cut creator intro & outro from every playlist video"
-            className={`flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors whitespace-nowrap ${
+            title="Automatically cut creator intro & outro for the active playlist"
+            className={`flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px] font-medium whitespace-nowrap transition-colors ${
               isTrimOpen || hasTrim
                 ? 'bio-glow-chip'
                 : 'border-cyan-200/15 bg-cyan-400/[0.05] text-slate-200 hover:border-cyan-300/40'
@@ -711,16 +750,87 @@ export function VideoPlaylistPanel({
           <button
             type="button"
             onClick={() => setIsPlaylistOpen((v) => !v)}
-            className={`flex h-7 cursor-pointer items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-medium transition-colors whitespace-nowrap ${
+            className={`flex h-7 cursor-pointer items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-medium whitespace-nowrap transition-colors ${
               isPlaylistOpen
                 ? 'bio-glow-chip'
                 : 'border-cyan-200/15 bg-cyan-400/[0.05] text-slate-200 hover:border-cyan-300/40'
             }`}
           >
             <ListVideo className="h-3.5 w-3.5" />
-            Playlist ({playlist.length})
+            Videos ({playlist.length})
           </button>
         </div>
+      </div>
+
+      {/* Multi-Playlist Switcher Bar (Each playlist preserves its own videos and intro/outro trim rules) */}
+      <div className="quiet-scroll flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-cyan-200/[0.08] bg-[#040917]/75 px-3 py-1.5">
+        <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+          Playlists
+        </span>
+        {playlists.map((pl) => {
+          const active = pl.id === activePlaylist?.id;
+          const plHasTrim = pl.trimIntroSeconds > 0 || pl.trimOutroSeconds > 0;
+          return (
+            <button
+              key={pl.id}
+              type="button"
+              onClick={() => onSelectPlaylist(pl.id)}
+              className={`flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium whitespace-nowrap transition-colors ${
+                active
+                  ? 'border-cyan-300/45 bg-cyan-400/18 text-cyan-100'
+                  : 'border-cyan-200/12 bg-cyan-400/[0.04] text-slate-300 hover:border-cyan-300/30 hover:text-cyan-100'
+              }`}
+            >
+              <span>{pl.title}</span>
+              <span className="font-mono-tabular text-[10px] opacity-75">
+                ({pl.items.length})
+              </span>
+              {plHasTrim && (
+                <Scissors className="h-2.5 w-2.5 text-amber-200" aria-label="Has custom trim rule" />
+              )}
+            </button>
+          );
+        })}
+
+        {creatingPlaylist ? (
+          <form onSubmit={submitNewPlaylist} className="flex shrink-0 items-center gap-1">
+            <input
+              type="text"
+              autoFocus
+              value={newPlaylistTitle}
+              onChange={(e) => setNewPlaylistTitle(e.target.value)}
+              placeholder="Playlist name..."
+              className="bio-input h-6 w-32 rounded px-2 text-[11px] placeholder:text-slate-500"
+            />
+            <button
+              type="submit"
+              disabled={!newPlaylistTitle.trim()}
+              className="bio-btn-primary h-6 cursor-pointer rounded px-2 text-[10px] font-semibold disabled:opacity-40"
+            >
+              Add
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setCreatingPlaylist(false);
+                setNewPlaylistTitle('');
+              }}
+              aria-label="Cancel new playlist"
+              className="flex h-6 w-6 cursor-pointer items-center justify-center rounded text-slate-400 hover:text-slate-200"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setCreatingPlaylist(true)}
+            className="flex shrink-0 cursor-pointer items-center gap-1 rounded-md border border-dashed border-cyan-300/30 bg-cyan-400/[0.04] px-2 py-1 text-[11px] font-medium text-cyan-200 hover:border-cyan-300/55 hover:bg-cyan-400/12 whitespace-nowrap"
+          >
+            <Plus className="h-3 w-3" />
+            New Playlist
+          </button>
+        )}
       </div>
 
       {/* Collapsible Manual Intro/Outro Trim Strip */}
@@ -801,7 +911,10 @@ export function VideoPlaylistPanel({
           </div>
 
           <span className="text-[11px] text-slate-400">
-            Applied automatically across every video in this playlist
+            Rule saved specifically for{' '}
+            <strong className="text-cyan-200">
+              {activePlaylist?.title ?? 'this playlist'}
+            </strong>
           </span>
         </div>
       )}
@@ -924,25 +1037,98 @@ export function VideoPlaylistPanel({
           className="hidden"
         />
 
-        {/* Slide-Over Playlist Drawer (Only Visible When Toggled) */}
+        {/* Slide-Over Playlist Drawer (Full width on mobile/tablet portrait so choosing videos is effortless) */}
         {isPlaylistOpen && (
           <aside
             aria-label="Manage Playlist"
-            className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-full flex-col border-l border-cyan-200/20 bg-[#050918]/95 shadow-2xl backdrop-blur-xl"
+            className="absolute inset-0 z-30 flex w-full flex-col border-l border-cyan-200/20 bg-[#050918]/98 shadow-2xl backdrop-blur-xl md:left-auto md:w-96"
           >
-            <div className="flex items-center justify-between border-b border-cyan-200/[0.1] px-3.5 py-2.5">
-              <span className="font-display text-xs font-semibold text-slate-100">
-                Session Playlist ({playlist.length})
-              </span>
+            <div className="flex items-center justify-between gap-2 border-b border-cyan-200/[0.1] px-3.5 py-2.5">
+              {activePlaylist && editingPlaylistId === activePlaylist.id ? (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    commitRenamePlaylist(activePlaylist.id);
+                  }}
+                  className="flex min-w-0 flex-1 items-center gap-1"
+                >
+                  <input
+                    type="text"
+                    autoFocus
+                    value={editingPlaylistTitle}
+                    onChange={(e) => setEditingPlaylistTitle(e.target.value)}
+                    className="bio-input h-7 min-w-0 flex-1 rounded px-2 text-xs"
+                  />
+                  <button
+                    type="submit"
+                    aria-label="Save playlist name"
+                    className="flex h-7 w-7 cursor-pointer items-center justify-center rounded bg-cyan-400/20 text-cyan-100"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                  </button>
+                </form>
+              ) : (
+                <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                  <span className="truncate font-display text-xs font-semibold text-slate-100">
+                    {activePlaylist ? activePlaylist.title : 'Playlist'} ({playlist.length})
+                  </span>
+                  {activePlaylist && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingPlaylistId(activePlaylist.id);
+                        setEditingPlaylistTitle(activePlaylist.title);
+                      }}
+                      title="Rename playlist"
+                      aria-label="Rename playlist"
+                      className="cursor-pointer rounded p-1 text-slate-400 hover:bg-cyan-400/10 hover:text-cyan-100"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                  )}
+                  {activePlaylist && playlists.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => onDeletePlaylist(activePlaylist.id)}
+                      title="Delete this playlist"
+                      aria-label="Delete this playlist"
+                      className="cursor-pointer rounded p-1 text-slate-400 hover:bg-rose-500/15 hover:text-rose-200"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+              )}
+
               <button
                 type="button"
                 onClick={() => setIsPlaylistOpen(false)}
                 aria-label="Close playlist drawer"
-                className="flex h-6 w-6 cursor-pointer items-center justify-center rounded text-slate-400 hover:bg-cyan-400/15 hover:text-cyan-100"
+                className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded text-slate-400 hover:bg-cyan-400/15 hover:text-cyan-100"
               >
-                <X className="h-3.5 w-3.5" />
+                <X className="h-4 w-4" />
               </button>
             </div>
+
+            {/* Quick playlist tabs inside drawer for mobile/tablet navigation */}
+            {playlists.length > 1 && (
+              <div className="quiet-scroll flex shrink-0 items-center gap-1 overflow-x-auto border-b border-cyan-200/[0.08] bg-[#030611]/70 px-3 py-1.5">
+                {playlists.map((pl) => (
+                  <button
+                    key={pl.id}
+                    type="button"
+                    onClick={() => onSelectPlaylist(pl.id)}
+                    className={`shrink-0 cursor-pointer rounded px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ${
+                      pl.id === activePlaylist?.id
+                        ? 'bg-cyan-400/20 text-cyan-100'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {pl.title} ({pl.items.length})
+                  </button>
+                ))}
+              </div>
+            )}
 
             <form
               onSubmit={handleAddSubmit}
@@ -967,7 +1153,7 @@ export function VideoPlaylistPanel({
                   type="submit"
                   disabled={!videoUrl.trim() || isImportingPlaylist}
                   aria-label="Add video or playlist URL"
-                  className="bio-btn-primary flex h-7 w-7 cursor-pointer items-center justify-center rounded-md disabled:opacity-40 shrink-0"
+                  className="bio-btn-primary flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md disabled:opacity-40"
                 >
                   <Plus className="h-3.5 w-3.5" />
                 </button>
@@ -976,7 +1162,7 @@ export function VideoPlaylistPanel({
                   onClick={() => fileInputRef.current?.click()}
                   title="Load local video file"
                   aria-label="Load local video file"
-                  className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border border-cyan-200/15 bg-cyan-400/[0.06] text-slate-300 hover:text-cyan-100 shrink-0"
+                  className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-cyan-200/15 bg-cyan-400/[0.06] text-slate-300 hover:text-cyan-100"
                 >
                   <Upload className="h-3.5 w-3.5" />
                 </button>

@@ -3,10 +3,14 @@ import type {
   ChecklistColumn,
   ChecklistRow,
   ChecklistTableRecord,
+  CustomDateLogSheet,
   CycleDayLog,
   CycleFlowLevel,
   DailyPlanRecord,
+  DateRangeLogSheet,
+  DayLogCanvasBlock,
   DayLogEntry,
+  DayLogSheetDivision,
   DayLogStroke,
   GamificationStats,
   GoalCadence,
@@ -17,6 +21,7 @@ import type {
   GoalTaskEntry,
   GoalUnit,
   PhaseConfig,
+  PlaylistItem,
   PriorityDeadline,
   SalahName,
   SessionLog,
@@ -24,12 +29,18 @@ import type {
   TaskItem,
   TimerSettings,
   UserProfile,
+  VideoPlaylistGroup,
 } from '../types';
+import { resolveStepDateIso } from './goalRewards';
 
 const PROFILES_KEY = 'focuspair.profiles.v2';
 const ACTIVE_PROFILE_KEY = 'focuspair.activeProfileId.v2';
-const AUTH_TOKEN_KEY = 'focuspair.authToken.v1';
+const LEGACY_AUTH_TOKEN_KEY = 'focuspair.authToken.v1';
 const TIMER_SNAPSHOT_KEY = 'focuspair.activeTimer.v1';
+
+// Keep auth bearer token strictly in memory (never localStorage/sessionStorage)
+let inMemoryAuthToken: string | null = null;
+let legacyTokenCleaned = false;
 
 export const DEFAULT_TIMER_SETTINGS: TimerSettings = {
   workMinutes: 25,
@@ -46,6 +57,15 @@ export function createStudyCard(
   timerSettings: TimerSettings = DEFAULT_TIMER_SETTINGS
 ): StudySessionCard {
   const now = Date.now();
+  const defaultPlaylist: VideoPlaylistGroup = {
+    id: `pl-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    title: 'Main Playlist',
+    items: [],
+    activeVideoId: null,
+    trimIntroSeconds: 0,
+    trimOutroSeconds: 0,
+    createdAt: now,
+  };
   return {
     id: `card-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     title: title.trim() || 'Untitled Study Session',
@@ -57,6 +77,8 @@ export function createStudyCard(
     activeVideoId: null,
     videoTrimIntroSeconds: 0,
     videoTrimOutroSeconds: 0,
+    playlists: [defaultPlaylist],
+    activePlaylistId: defaultPlaylist.id,
     timerSettings: { ...timerSettings },
     sessionLogs: [],
   };
@@ -150,7 +172,11 @@ export function createDefaultDailyEntries(): {
   };
 }
 
-export function createDefaultDailyPlan(dateKey = toLocalDateKey(Date.now())): DailyPlanRecord {
+export function createDefaultDailyPlan(
+  dateKey = toLocalDateKey(Date.now()),
+  syncedGoalIds: string[] = [],
+  autoSyncGoals = true
+): DailyPlanRecord {
   const { priorities, todos } = createDefaultDailyEntries();
   const now = Date.now();
   return {
@@ -158,6 +184,8 @@ export function createDefaultDailyPlan(dateKey = toLocalDateKey(Date.now())): Da
     priorities,
     todos,
     dismissedImportBanner: false,
+    syncedGoalIds,
+    autoSyncGoals,
     createdAt: now,
     updatedAt: now,
   };
@@ -210,6 +238,7 @@ function normalizeTaskEntries(
             ...(deadline ? { deadline } : {}),
             completedAt: typeof item.completedAt === 'number' ? item.completedAt : undefined,
             missedAt: typeof item.missedAt === 'number' ? item.missedAt : undefined,
+            ...(typeof item.syncKey === 'string' && item.syncKey ? { syncKey: item.syncKey } : {}),
           };
         })
     : [];
@@ -237,6 +266,10 @@ export function normalizeDailyPlan(raw: unknown, fallbackDateKey?: string): Dail
     priorities: normalizeTaskEntries(r.priorities, 'priority', 3),
     todos: normalizeTaskEntries(r.todos, 'todo', 5),
     dismissedImportBanner: Boolean(r.dismissedImportBanner),
+    syncedGoalIds: Array.isArray(r.syncedGoalIds)
+      ? r.syncedGoalIds.filter((id): id is string => typeof id === 'string')
+      : [],
+    autoSyncGoals: r.autoSyncGoals === undefined ? true : Boolean(r.autoSyncGoals),
     createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
     updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : Date.now(),
   };
@@ -248,6 +281,163 @@ export function normalizeDailyHistory(raw: unknown): DailyPlanRecord[] {
     .map((item) => normalizeDailyPlan(item))
     .filter((item): item is DailyPlanRecord => Boolean(item))
     .slice(0, 60);
+}
+
+export function normalizeScheduledDailyPlans(raw: unknown): Record<string, DailyPlanRecord> {
+  if (!raw || typeof raw !== 'object') return {};
+  const result: Record<string, DailyPlanRecord> = {};
+  for (const [key, val] of Object.entries(raw)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) continue;
+    const norm = normalizeDailyPlan(val, key);
+    if (norm) {
+      result[key] = {
+        ...norm,
+        dateKey: key,
+        priorities: norm.priorities.filter((p) => p.text.trim()),
+        todos: norm.todos.filter((t) => t.text.trim()),
+      };
+    }
+  }
+  return result;
+}
+
+export function resolveMatchingStepIndexForDate(goal: GoalPlan, dateKey: string): number {
+  const directIdx = goal.steps.findIndex((s) => s.dateLabel === dateKey);
+  if (directIdx !== -1) return directIdx;
+
+  // Fallback via computed date resolution for custom/week/phase goals
+  for (let i = 0; i < goal.steps.length; i++) {
+    const resolved = resolveStepDateIso(goal, goal.steps[i]);
+    if (resolved === dateKey) return i;
+  }
+
+  // Fallback for month goals matching YYYY-MM
+  if (goal.cadence === 'month') {
+    const monthKey = dateKey.slice(0, 7);
+    return goal.steps.findIndex((s) => s.monthKey === monthKey);
+  }
+  return -1;
+}
+
+export function hydrateDailyPlanWithGoalsAndSchedule(
+  dailyPlan: DailyPlanRecord,
+  goals: GoalPlan[],
+  scheduledDailyPlans: Record<string, DailyPlanRecord> = {},
+  todayKey = toLocalDateKey(Date.now())
+): {
+  dailyPlan: DailyPlanRecord;
+  scheduledDailyPlans: Record<string, DailyPlanRecord>;
+  changed: boolean;
+} {
+  let changed = false;
+  const nextScheduled = { ...scheduledDailyPlans };
+  const priorities = [...dailyPlan.priorities];
+  const todos = [...dailyPlan.todos];
+
+  const insertOrSyncEntry = (source: GoalTaskEntry, syncKey: string) => {
+    const cleanText = source.text.trim();
+    if (!cleanText) return;
+    const list = source.kind === 'priority' ? priorities : todos;
+    const existingIdx = list.findIndex(
+      (e) =>
+        (e.syncKey && e.syncKey === syncKey) ||
+        (e.text.trim().toLowerCase() === cleanText.toLowerCase() && e.kind === source.kind)
+    );
+    if (existingIdx !== -1) {
+      const existing = list[existingIdx];
+      const nextStatus = source.status === 'empty' ? existing.status : source.status;
+      if (
+        existing.text !== source.text ||
+        existing.status !== nextStatus ||
+        existing.syncKey !== syncKey
+      ) {
+        list[existingIdx] = {
+          ...existing,
+          text: source.text,
+          status: nextStatus === 'empty' ? 'pending' : nextStatus,
+          completedAt: source.completedAt ?? existing.completedAt,
+          missedAt: source.missedAt ?? existing.missedAt,
+          deadline: source.deadline ?? existing.deadline,
+          syncKey,
+        };
+        changed = true;
+      }
+      return;
+    }
+
+    const emptySlotIdx = list.findIndex((e) => !e.text.trim());
+    const newEntry: GoalTaskEntry = {
+      id: makeEntryId(source.kind === 'priority' ? 'pri' : 'todo'),
+      kind: source.kind,
+      text: source.text,
+      status: source.status === 'empty' ? 'pending' : source.status,
+      ...(source.deadline ? { deadline: source.deadline } : {}),
+      ...(source.completedAt ? { completedAt: source.completedAt } : {}),
+      ...(source.missedAt ? { missedAt: source.missedAt } : {}),
+      syncKey,
+    };
+    if (emptySlotIdx !== -1) {
+      list[emptySlotIdx] = newEntry;
+    } else {
+      list.push(newEntry);
+    }
+    changed = true;
+  };
+
+  // 1. Absorb tasks scheduled specifically for today (or expired scheduled days <= todayKey moved into today)
+  for (const [schedDate, schedPlan] of Object.entries(scheduledDailyPlans)) {
+    if (schedDate <= todayKey) {
+      for (const p of schedPlan.priorities) {
+        if (p.text.trim()) {
+          insertOrSyncEntry(p, p.syncKey ?? `sched:${schedDate}:${p.id}`);
+        }
+      }
+      for (const t of schedPlan.todos) {
+        if (t.text.trim()) {
+          insertOrSyncEntry(t, t.syncKey ?? `sched:${schedDate}:${t.id}`);
+        }
+      }
+      delete nextScheduled[schedDate];
+      changed = true;
+    }
+  }
+
+  // 2. Live auto-sync from any goals selected for Daily sync
+  const syncedGoalIds = dailyPlan.syncedGoalIds ?? [];
+  if (dailyPlan.autoSyncGoals !== false && syncedGoalIds.length > 0) {
+    for (const goalId of syncedGoalIds) {
+      const goal = goals.find((g) => g.id === goalId);
+      if (!goal) continue;
+      const stepIdx = resolveMatchingStepIndexForDate(goal, todayKey);
+      if (stepIdx === -1) continue;
+      const step = goal.steps[stepIdx];
+      for (const p of step.priorities ?? []) {
+        if (p.text.trim()) {
+          insertOrSyncEntry(p, p.syncKey ?? `goal:${goal.id}:s${step.stepNumber}:pri:${p.id}`);
+        }
+      }
+      for (const t of step.todos ?? []) {
+        if (t.text.trim()) {
+          insertOrSyncEntry(t, t.syncKey ?? `goal:${goal.id}:s${step.stepNumber}:todo:${t.id}`);
+        }
+      }
+    }
+  }
+
+  if (!changed) {
+    return { dailyPlan, scheduledDailyPlans, changed: false };
+  }
+
+  return {
+    dailyPlan: {
+      ...dailyPlan,
+      priorities,
+      todos,
+      updatedAt: Date.now(),
+    },
+    scheduledDailyPlans: nextScheduled,
+    changed: true,
+  };
 }
 
 export function rolloverExpiredDailyPlan(
@@ -296,7 +486,11 @@ export function rolloverExpiredDailyPlan(
   }
 
   return {
-    activeDailyPlan: createDefaultDailyPlan(todayKey),
+    activeDailyPlan: createDefaultDailyPlan(
+      todayKey,
+      activeDailyPlan.syncedGoalIds ?? [],
+      activeDailyPlan.autoSyncGoals ?? true
+    ),
     dailyHistory: nextHistory,
     didRollover: true,
   };
@@ -494,6 +688,172 @@ export function normalizeChecklistTables(rawTables: unknown): ChecklistTableReco
     });
 }
 
+export function createDefaultTaskDivisions(): DayLogSheetDivision[] {
+  return [1, 2, 3].map((num) => ({
+    id: makeEntryId('tdiv'),
+    label: `Task ${num}`,
+    completed: false,
+    note: '',
+  }));
+}
+
+export function createDefaultCustomDivisions(): DayLogSheetDivision[] {
+  return [1, 2, 3].map((num) => ({
+    id: makeEntryId('cdiv'),
+    label: `Item ${num}`,
+    note: '',
+  }));
+}
+
+export function createCustomDateLogSheet(
+  dateKey = toLocalDateKey(Date.now()),
+  title = 'Custom Log',
+  defaultDivisionCount = 3
+): CustomDateLogSheet {
+  const now = Date.now();
+  const count = Math.max(1, defaultDivisionCount);
+  return {
+    id: makeEntryId('cdlog'),
+    dateKey,
+    title: title.trim() || 'Custom Log',
+    divisions: Array.from({ length: count }, (_, idx) => ({
+      id: makeEntryId('cdiv'),
+      label: `Item ${idx + 1}`,
+      note: '',
+    })),
+    strokes: [],
+    divisionHeight: 136,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function formatShortCalendarDateLabel(dateKey: string): string {
+  const [y, m, d] = dateKey.split('-').map((n) => Number.parseInt(n, 10));
+  if (!y || !m || !d) return dateKey;
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+export function buildMonthStartEnd(monthKey: string): { startDate: string; endDate: string } {
+  const [yRaw, mRaw] = monthKey.split('-').map((n) => Number.parseInt(n, 10));
+  const now = new Date();
+  const y = Number.isFinite(yRaw) && yRaw > 1970 ? yRaw : now.getFullYear();
+  const m = Number.isFinite(mRaw) && mRaw >= 1 && mRaw <= 12 ? mRaw : now.getMonth() + 1;
+  const start = new Date(y, m - 1, 1);
+  const end = new Date(y, m, 0);
+  return {
+    startDate: toLocalDateKey(start.getTime()),
+    endDate: toLocalDateKey(end.getTime()),
+  };
+}
+
+export function buildDateDivisionsForRange(
+  startDate: string,
+  endDate: string,
+  existingDivisions: DayLogSheetDivision[] = []
+): DayLogSheetDivision[] {
+  const startMs = Date.parse(`${startDate}T00:00:00`);
+  const endMs = Date.parse(`${endDate}T00:00:00`);
+  const safeStart = Number.isFinite(startMs) ? new Date(startMs) : new Date();
+  safeStart.setHours(0, 0, 0, 0);
+  let safeEnd = Number.isFinite(endMs) ? new Date(endMs) : new Date(safeStart);
+  safeEnd.setHours(0, 0, 0, 0);
+  if (safeEnd.getTime() < safeStart.getTime()) {
+    safeEnd = new Date(safeStart);
+  }
+
+  const existingByDate = new Map<string, DayLogSheetDivision>();
+  for (const div of existingDivisions) {
+    if (div.dateKey) existingByDate.set(div.dateKey, div);
+  }
+
+  const out: DayLogSheetDivision[] = [];
+  const cursor = new Date(safeStart);
+  const maxDays = 62; // Cap to ~2 months so canvas memory stays crisp on tablets
+  while (cursor.getTime() <= safeEnd.getTime() && out.length < maxDays) {
+    const dk = toLocalDateKey(cursor.getTime());
+    const prev = existingByDate.get(dk);
+    out.push({
+      id: prev?.id ?? makeEntryId('drow'),
+      dateKey: dk,
+      label: formatShortCalendarDateLabel(dk),
+      completed: prev?.completed ?? false,
+      note: prev?.note ?? '',
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return out;
+}
+
+export function createDateRangeLogSheet(options?: {
+  title?: string;
+  mode?: 'range' | 'month';
+  startDate?: string;
+  endDate?: string;
+  monthKey?: string;
+}): DateRangeLogSheet {
+  const now = Date.now();
+  const todayKey = toLocalDateKey(now);
+  const todayDate = new Date(`${todayKey}T00:00:00`);
+  const defaultEndDate = new Date(todayDate);
+  defaultEndDate.setDate(todayDate.getDate() + 6); // 7-day default window; user can pick any From -> To range
+
+  const mode = options?.mode === 'month' ? 'month' : 'range';
+  const monthKey = options?.monthKey && /^\d{4}-\d{2}$/.test(options.monthKey)
+    ? options.monthKey
+    : todayKey.slice(0, 7);
+
+  let startDate = options?.startDate || todayKey;
+  let endDate = options?.endDate || toLocalDateKey(defaultEndDate.getTime());
+  if (mode === 'month') {
+    const bounds = buildMonthStartEnd(monthKey);
+    startDate = bounds.startDate;
+    endDate = bounds.endDate;
+  }
+
+  return {
+    id: makeEntryId('drlog'),
+    title: options?.title?.trim() || 'Custom Logs',
+    mode,
+    startDate,
+    endDate,
+    monthKey,
+    divisions: buildDateDivisionsForRange(startDate, endDate),
+    strokes: [],
+    divisionHeight: 136,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultTaskLogBlocks(): DayLogCanvasBlock[] {
+  const now = Date.now();
+  return [1, 2, 3].map((num) => ({
+    id: makeEntryId('tlog'),
+    title: `Task ${num}`,
+    completed: false,
+    strokes: [],
+    height: 300,
+    updatedAt: now,
+  }));
+}
+
+export function createDefaultCustomLogBlocks(): DayLogCanvasBlock[] {
+  const now = Date.now();
+  return [1, 2, 3].map((num) => ({
+    id: makeEntryId('clog'),
+    title: `Section ${num}`,
+    strokes: [],
+    height: 300,
+    updatedAt: now,
+  }));
+}
+
 export function createDefaultDayLog(dateKey = toLocalDateKey(Date.now())): DayLogEntry {
   const now = Date.now();
   return {
@@ -501,6 +861,11 @@ export function createDefaultDayLog(dateKey = toLocalDateKey(Date.now())): DayLo
     dateKey,
     strokes: [],
     hourNotes: {},
+    taskDivisions: createDefaultTaskDivisions(),
+    taskStrokes: [],
+    taskDivisionHeight: 136,
+    taskBlocks: createDefaultTaskLogBlocks(),
+    customBlocks: createDefaultCustomLogBlocks(),
     createdAt: now,
     updatedAt: now,
   };
@@ -525,6 +890,122 @@ function normalizeStrokes(raw: unknown): DayLogStroke[] {
     .filter((s) => s.points.length > 0);
 }
 
+function normalizeSheetDivisions(
+  raw: unknown,
+  fallbackFn: () => DayLogSheetDivision[]
+): DayLogSheetDivision[] {
+  if (!Array.isArray(raw) || raw.length === 0) return fallbackFn();
+  return raw
+    .filter((d): d is DayLogSheetDivision => Boolean(d && typeof d === 'object'))
+    .map((d, idx) => ({
+      id: typeof d.id === 'string' && d.id ? d.id : makeEntryId('div'),
+      label:
+        typeof d.label === 'string' && d.label.trim() ? d.label : `Item ${idx + 1}`,
+      ...(typeof d.dateKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.dateKey)
+        ? { dateKey: d.dateKey }
+        : {}),
+      ...(typeof d.completed === 'boolean' ? { completed: d.completed } : {}),
+      ...(typeof d.note === 'string' ? { note: d.note } : {}),
+    }));
+}
+
+export function normalizeCustomDateLogs(raw: unknown): CustomDateLogSheet[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return [createCustomDateLogSheet(toLocalDateKey(Date.now()), 'Custom Log')];
+  }
+  return raw
+    .filter((item): item is CustomDateLogSheet => Boolean(item && typeof item === 'object'))
+    .map((item, idx) => ({
+      id: typeof item.id === 'string' && item.id ? item.id : makeEntryId('cdlog'),
+      dateKey:
+        typeof item.dateKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dateKey)
+          ? item.dateKey
+          : toLocalDateKey(Date.now()),
+      title:
+        typeof item.title === 'string' && item.title.trim()
+          ? item.title
+          : `Custom Log ${idx + 1}`,
+      divisions: normalizeSheetDivisions(item.divisions, createDefaultCustomDivisions),
+      strokes: normalizeStrokes(item.strokes),
+      divisionHeight:
+        typeof item.divisionHeight === 'number' &&
+        item.divisionHeight >= 96 &&
+        item.divisionHeight <= 240
+          ? item.divisionHeight
+          : 136,
+      createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
+      updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+    }));
+}
+
+export function normalizeDateRangeLogs(raw: unknown): DateRangeLogSheet[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return [createDateRangeLogSheet()];
+  }
+  return raw
+    .filter((item): item is DateRangeLogSheet => Boolean(item && typeof item === 'object'))
+    .map((item, idx) => {
+      const mode = item.mode === 'month' ? 'month' : 'range';
+      const todayKey = toLocalDateKey(Date.now());
+      const monthKey =
+        typeof item.monthKey === 'string' && /^\d{4}-\d{2}$/.test(item.monthKey)
+          ? item.monthKey
+          : todayKey.slice(0, 7);
+      const startDate =
+        typeof item.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.startDate)
+          ? item.startDate
+          : todayKey;
+      const endDate =
+        typeof item.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.endDate)
+          ? item.endDate
+          : startDate;
+      const divisions = normalizeSheetDivisions(item.divisions, () =>
+        buildDateDivisionsForRange(startDate, endDate)
+      );
+      return {
+        id: typeof item.id === 'string' && item.id ? item.id : makeEntryId('drlog'),
+        title:
+          typeof item.title === 'string' && item.title.trim()
+            ? item.title
+            : idx === 0
+              ? 'Custom Logs'
+              : `Custom Logs ${idx + 1}`,
+        mode,
+        startDate,
+        endDate,
+        monthKey,
+        divisions,
+        strokes: normalizeStrokes(item.strokes),
+        divisionHeight:
+          typeof item.divisionHeight === 'number' &&
+          item.divisionHeight >= 96 &&
+          item.divisionHeight <= 240
+            ? item.divisionHeight
+            : 136,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+      };
+    });
+}
+
+function normalizeCanvasBlocks(
+  raw: unknown,
+  fallbackFn: () => DayLogCanvasBlock[]
+): DayLogCanvasBlock[] {
+  if (!Array.isArray(raw) || raw.length === 0) return fallbackFn();
+  return raw
+    .filter((b): b is DayLogCanvasBlock => Boolean(b && typeof b && typeof b === 'object'))
+    .map((b, idx) => ({
+      id: typeof b.id === 'string' && b.id ? b.id : makeEntryId('blk'),
+      title: typeof b.title === 'string' && b.title.trim() ? b.title : `Sheet ${idx + 1}`,
+      ...(typeof b.completed === 'boolean' ? { completed: b.completed } : {}),
+      strokes: normalizeStrokes(b.strokes),
+      height:
+        typeof b.height === 'number' && b.height >= 180 && b.height <= 900 ? b.height : 300,
+      updatedAt: typeof b.updatedAt === 'number' ? b.updatedAt : Date.now(),
+    }));
+}
+
 export function normalizeDayLogEntry(raw: unknown): DayLogEntry {
   if (!raw || typeof raw !== 'object') {
     return createDefaultDayLog();
@@ -542,6 +1023,16 @@ export function normalizeDayLogEntry(raw: unknown): DayLogEntry {
     ...(typeof r.title === 'string' ? { title: r.title } : {}),
     strokes: normalizeStrokes(r.strokes),
     hourNotes,
+    taskDivisions: normalizeSheetDivisions(r.taskDivisions, createDefaultTaskDivisions),
+    taskStrokes: normalizeStrokes(r.taskStrokes),
+    taskDivisionHeight:
+      typeof r.taskDivisionHeight === 'number' &&
+      r.taskDivisionHeight >= 96 &&
+      r.taskDivisionHeight <= 240
+        ? r.taskDivisionHeight
+        : 136,
+    taskBlocks: normalizeCanvasBlocks(r.taskBlocks, createDefaultTaskLogBlocks),
+    customBlocks: normalizeCanvasBlocks(r.customBlocks, createDefaultCustomLogBlocks),
     ...(typeof r.cycleSummary === 'string' ? { cycleSummary: r.cycleSummary } : {}),
     createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
     updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : Date.now(),
@@ -584,42 +1075,113 @@ export function normalizeCycleLogs(raw: unknown): Record<string, CycleDayLog> {
   return result;
 }
 
+function sanitizePlaylistItems(raw: unknown): PlaylistItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (v): v is PlaylistItem =>
+      Boolean(v && typeof v === 'object' && typeof (v as PlaylistItem).url === 'string') &&
+      (v as PlaylistItem).sourceType !== 'local'
+  );
+}
+
+function normalizePlaylistsForCard(c: StudySessionCard): {
+  playlists: VideoPlaylistGroup[];
+  activePlaylistId: string;
+  activeGroup: VideoPlaylistGroup;
+} {
+  const now = typeof c.createdAt === 'number' ? c.createdAt : Date.now();
+  const rawGroups = Array.isArray(c.playlists)
+    ? c.playlists
+        .filter((g): g is VideoPlaylistGroup => Boolean(g && typeof g === 'object' && 'id' in g))
+        .map((g, idx) => ({
+          id: typeof g.id === 'string' && g.id ? g.id : `pl-${now.toString(36)}-${idx}`,
+          title: typeof g.title === 'string' && g.title.trim() ? g.title : `Playlist ${idx + 1}`,
+          items: sanitizePlaylistItems(g.items),
+          activeVideoId: typeof g.activeVideoId === 'string' ? g.activeVideoId : null,
+          trimIntroSeconds:
+            typeof g.trimIntroSeconds === 'number' && g.trimIntroSeconds >= 0
+              ? g.trimIntroSeconds
+              : 0,
+          trimOutroSeconds:
+            typeof g.trimOutroSeconds === 'number' && g.trimOutroSeconds >= 0
+              ? g.trimOutroSeconds
+              : 0,
+          createdAt: typeof g.createdAt === 'number' ? g.createdAt : now + idx,
+        }))
+    : [];
+
+  if (rawGroups.length === 0) {
+    const legacyGroup: VideoPlaylistGroup = {
+      id: `pl-${c.id}`,
+      title: 'Main Playlist',
+      items: sanitizePlaylistItems(c.playlist),
+      activeVideoId: typeof c.activeVideoId === 'string' ? c.activeVideoId : null,
+      trimIntroSeconds:
+        typeof c.videoTrimIntroSeconds === 'number' && c.videoTrimIntroSeconds >= 0
+          ? c.videoTrimIntroSeconds
+          : 0,
+      trimOutroSeconds:
+        typeof c.videoTrimOutroSeconds === 'number' && c.videoTrimOutroSeconds >= 0
+          ? c.videoTrimOutroSeconds
+          : 0,
+      createdAt: now,
+    };
+    return {
+      playlists: [legacyGroup],
+      activePlaylistId: legacyGroup.id,
+      activeGroup: legacyGroup,
+    };
+  }
+
+  const activeGroup =
+    rawGroups.find((g) => g.id === c.activePlaylistId) ?? rawGroups[0];
+  return {
+    playlists: rawGroups,
+    activePlaylistId: activeGroup.id,
+    activeGroup,
+  };
+}
+
 export function normalizeStudyCards(rawCards: unknown[]): StudySessionCard[] {
   if (!Array.isArray(rawCards)) return [];
   return rawCards
     .filter((c): c is StudySessionCard => Boolean(c && typeof c === 'object' && 'id' in c))
-    .map((c) => ({
-      ...c,
-      title: typeof c.title === 'string' && c.title.trim() ? c.title : 'Untitled Study Session',
-      accent: c.accent ?? 'amber',
-      createdAt: typeof c.createdAt === 'number' ? c.createdAt : Date.now(),
-      lastOpenedAt: typeof c.lastOpenedAt === 'number' ? c.lastOpenedAt : Date.now(),
-      tasks: Array.isArray(c.tasks) ? c.tasks : [],
-      playlist: Array.isArray(c.playlist)
-        ? c.playlist.filter((v) => v.sourceType !== 'local')
-        : [],
-      activeVideoId: c.activeVideoId ?? null,
-      videoTrimIntroSeconds:
-        typeof c.videoTrimIntroSeconds === 'number' && c.videoTrimIntroSeconds >= 0
-          ? c.videoTrimIntroSeconds
-          : 0,
-      videoTrimOutroSeconds:
-        typeof c.videoTrimOutroSeconds === 'number' && c.videoTrimOutroSeconds >= 0
-          ? c.videoTrimOutroSeconds
-          : 0,
-      timerSettings: { ...DEFAULT_TIMER_SETTINGS, ...(c.timerSettings ?? {}) },
-      sessionLogs: Array.isArray(c.sessionLogs)
-        ? c.sessionLogs.map((l) => ({ ...l, videoUrl: undefined }))
-        : [],
-    }));
+    .map((c) => {
+      const { playlists, activePlaylistId, activeGroup } = normalizePlaylistsForCard(c);
+      return {
+        ...c,
+        title: typeof c.title === 'string' && c.title.trim() ? c.title : 'Untitled Study Session',
+        accent: c.accent ?? 'amber',
+        createdAt: typeof c.createdAt === 'number' ? c.createdAt : Date.now(),
+        lastOpenedAt: typeof c.lastOpenedAt === 'number' ? c.lastOpenedAt : Date.now(),
+        tasks: Array.isArray(c.tasks) ? c.tasks : [],
+        playlists,
+        activePlaylistId,
+        playlist: activeGroup.items,
+        activeVideoId: activeGroup.activeVideoId,
+        videoTrimIntroSeconds: activeGroup.trimIntroSeconds,
+        videoTrimOutroSeconds: activeGroup.trimOutroSeconds,
+        timerSettings: { ...DEFAULT_TIMER_SETTINGS, ...(c.timerSettings ?? {}) },
+        sessionLogs: Array.isArray(c.sessionLogs)
+          ? c.sessionLogs.map((l) => ({ ...l, videoUrl: undefined }))
+          : [],
+      };
+    });
 }
 
 export function sanitizeStudyCardsForSync(cards: StudySessionCard[]): StudySessionCard[] {
-  return cards.map((c) => ({
-    ...c,
-    playlist: c.playlist.filter((v) => v.sourceType !== 'local'),
-    sessionLogs: c.sessionLogs.map(({ videoUrl: _omit, ...rest }) => rest),
-  }));
+  return cards.map((c) => {
+    const cleanPlaylists = (c.playlists ?? []).map((pl) => ({
+      ...pl,
+      items: pl.items.filter((v) => v.sourceType !== 'local'),
+    }));
+    return {
+      ...c,
+      playlist: c.playlist.filter((v) => v.sourceType !== 'local'),
+      ...(cleanPlaylists.length > 0 ? { playlists: cleanPlaylists } : {}),
+      sessionLogs: c.sessionLogs.map(({ videoUrl: _omit, ...rest }) => rest),
+    };
+  });
 }
 
 function migrateProfile(raw: UserProfile): UserProfile {
@@ -642,9 +1204,15 @@ function migrateProfile(raw: UserProfile): UserProfile {
     cards.push(migratedCard);
   }
 
+  const goals = normalizeGoals(raw.goals);
   const rolled = rolloverExpiredDailyPlan(
     normalizeDailyPlan(raw.activeDailyPlan),
     normalizeDailyHistory(raw.dailyHistory)
+  );
+  const hydrated = hydrateDailyPlanWithGoalsAndSchedule(
+    rolled.activeDailyPlan,
+    goals,
+    normalizeScheduledDailyPlans(raw.scheduledDailyPlans)
   );
 
   return {
@@ -652,13 +1220,16 @@ function migrateProfile(raw: UserProfile): UserProfile {
     name: raw.name,
     createdAt: raw.createdAt ?? Date.now(),
     studyCards: cards,
-    goals: normalizeGoals(raw.goals),
+    goals,
     checklistTables: normalizeChecklistTables(raw.checklistTables),
     activeDayLog: normalizeDayLogEntry(raw.activeDayLog),
     dayLogHistory: normalizeDayLogHistory(raw.dayLogHistory),
+    customDateLogs: normalizeCustomDateLogs(raw.customDateLogs),
+    dateRangeLogs: normalizeDateRangeLogs(raw.dateRangeLogs),
     cycleLogs: normalizeCycleLogs(raw.cycleLogs),
-    activeDailyPlan: rolled.activeDailyPlan,
+    activeDailyPlan: hydrated.dailyPlan,
     dailyHistory: rolled.dailyHistory,
+    scheduledDailyPlans: hydrated.scheduledDailyPlans,
     gamification: normalizeGamification(raw.gamification),
     isCloudAccount: Boolean(raw.isCloudAccount),
   };
@@ -691,9 +1262,12 @@ export function saveProfiles(profiles: UserProfile[]): void {
         ...d,
         previewDataUrl: undefined,
       })),
+      customDateLogs: p.customDateLogs ?? [],
+      dateRangeLogs: p.dateRangeLogs ?? [],
       cycleLogs: p.cycleLogs ?? {},
       activeDailyPlan: p.activeDailyPlan,
       dailyHistory: p.dailyHistory ?? [],
+      scheduledDailyPlans: p.scheduledDailyPlans ?? {},
       gamification: p.gamification ?? DEFAULT_GAMIFICATION_STATS,
     }));
     localStorage.setItem(PROFILES_KEY, JSON.stringify(serializable));
@@ -723,20 +1297,21 @@ export function saveActiveProfileId(id: string | null): void {
 }
 
 export function loadAuthToken(): string | null {
-  try {
-    return localStorage.getItem(AUTH_TOKEN_KEY);
-  } catch {
-    return null;
+  if (!legacyTokenCleaned) {
+    legacyTokenCleaned = true;
+    try {
+      localStorage.removeItem(LEGACY_AUTH_TOKEN_KEY);
+    } catch {
+      // Ignore
+    }
   }
+  return inMemoryAuthToken;
 }
 
 export function saveAuthToken(token: string | null): void {
+  inMemoryAuthToken = token;
   try {
-    if (token) {
-      localStorage.setItem(AUTH_TOKEN_KEY, token);
-    } else {
-      localStorage.removeItem(AUTH_TOKEN_KEY);
-    }
+    localStorage.removeItem(LEGACY_AUTH_TOKEN_KEY);
   } catch {
     // Ignore
   }
@@ -744,9 +1319,12 @@ export function saveAuthToken(token: string | null): void {
 
 export interface ServerAccountResponse {
   token?: string;
+  syncKey?: string;
   account: {
     id: string;
     username: string;
+    hasPassword?: boolean;
+    hasSyncKey?: boolean;
     createdAt: number;
     updatedAt: number;
     studyCards: StudySessionCard[];
@@ -754,9 +1332,12 @@ export interface ServerAccountResponse {
     checklistTables?: ChecklistTableRecord[];
     activeDayLog?: DayLogEntry;
     dayLogHistory?: DayLogEntry[];
+    customDateLogs?: CustomDateLogSheet[];
+    dateRangeLogs?: DateRangeLogSheet[];
     cycleLogs?: Record<string, CycleDayLog>;
     activeDailyPlan?: DailyPlanRecord;
     dailyHistory?: DailyPlanRecord[];
+    scheduledDailyPlans?: Record<string, DailyPlanRecord>;
     gamification?: GamificationStats;
   };
 }
@@ -764,12 +1345,43 @@ export interface ServerAccountResponse {
 export interface DaySyncExtras {
   activeDayLog?: DayLogEntry;
   dayLogHistory?: DayLogEntry[];
+  customDateLogs?: CustomDateLogSheet[];
+  dateRangeLogs?: DateRangeLogSheet[];
   cycleLogs?: Record<string, CycleDayLog>;
+  scheduledDailyPlans?: Record<string, DailyPlanRecord>;
+}
+
+function normalizeServerAccount(rawAccount: ServerAccountResponse['account']): ServerAccountResponse['account'] {
+  const goals = normalizeGoals(rawAccount.goals);
+  const rolled = rolloverExpiredDailyPlan(
+    normalizeDailyPlan(rawAccount.activeDailyPlan),
+    normalizeDailyHistory(rawAccount.dailyHistory)
+  );
+  const hydrated = hydrateDailyPlanWithGoalsAndSchedule(
+    rolled.activeDailyPlan,
+    goals,
+    normalizeScheduledDailyPlans(rawAccount.scheduledDailyPlans)
+  );
+  return {
+    ...rawAccount,
+    studyCards: normalizeStudyCards(rawAccount.studyCards),
+    goals,
+    checklistTables: normalizeChecklistTables(rawAccount.checklistTables),
+    activeDayLog: normalizeDayLogEntry(rawAccount.activeDayLog),
+    dayLogHistory: normalizeDayLogHistory(rawAccount.dayLogHistory),
+    customDateLogs: normalizeCustomDateLogs(rawAccount.customDateLogs),
+    dateRangeLogs: normalizeDateRangeLogs(rawAccount.dateRangeLogs),
+    cycleLogs: normalizeCycleLogs(rawAccount.cycleLogs),
+    activeDailyPlan: hydrated.dailyPlan,
+    dailyHistory: rolled.dailyHistory,
+    scheduledDailyPlans: hydrated.scheduledDailyPlans,
+    gamification: normalizeGamification(rawAccount.gamification),
+  };
 }
 
 export async function registerAccount(
   username: string,
-  password: string,
+  password: string | undefined,
   studyCards: StudySessionCard[] = [],
   goals: GoalPlan[] = [],
   gamification: GamificationStats = DEFAULT_GAMIFICATION_STATS,
@@ -778,12 +1390,18 @@ export async function registerAccount(
   checklistTables: ChecklistTableRecord[] = [],
   daySync?: DaySyncExtras
 ): Promise<ServerAccountResponse> {
+  const cleanPassword = typeof password === 'string' && password.length > 0 ? password : undefined;
   const res = await fetch('/api/auth/register', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'FocusPair',
+    },
     body: JSON.stringify({
       username,
-      password,
+      passwordless: !cleanPassword,
+      ...(cleanPassword ? { password: cleanPassword } : {}),
       studyCards: sanitizeStudyCardsForSync(studyCards),
       goals,
       checklistTables,
@@ -798,7 +1416,12 @@ export async function registerAccount(
             })),
           }
         : {}),
+      ...(daySync?.customDateLogs ? { customDateLogs: daySync.customDateLogs } : {}),
+      ...(daySync?.dateRangeLogs ? { dateRangeLogs: daySync.dateRangeLogs } : {}),
       ...(daySync?.cycleLogs ? { cycleLogs: daySync.cycleLogs } : {}),
+      ...(daySync?.scheduledDailyPlans
+        ? { scheduledDailyPlans: daySync.scheduledDailyPlans }
+        : {}),
       activeDailyPlan,
       dailyHistory,
       gamification,
@@ -808,24 +1431,10 @@ export async function registerAccount(
   if (!res.ok) {
     throw new Error(data.error || 'Could not create account.');
   }
-  const rolled = rolloverExpiredDailyPlan(
-    normalizeDailyPlan(data.account.activeDailyPlan),
-    normalizeDailyHistory(data.account.dailyHistory)
-  );
   return {
     token: data.token,
-    account: {
-      ...data.account,
-      studyCards: normalizeStudyCards(data.account.studyCards),
-      goals: normalizeGoals(data.account.goals),
-      checklistTables: normalizeChecklistTables(data.account.checklistTables),
-      activeDayLog: normalizeDayLogEntry(data.account.activeDayLog),
-      dayLogHistory: normalizeDayLogHistory(data.account.dayLogHistory),
-      cycleLogs: normalizeCycleLogs(data.account.cycleLogs),
-      activeDailyPlan: rolled.activeDailyPlan,
-      dailyHistory: rolled.dailyHistory,
-      gamification: normalizeGamification(data.account.gamification),
-    },
+    syncKey: data.syncKey,
+    account: normalizeServerAccount(data.account),
   };
 }
 
@@ -835,56 +1444,184 @@ export async function loginAccount(
 ): Promise<ServerAccountResponse> {
   const res = await fetch('/api/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'FocusPair',
+    },
     body: JSON.stringify({ username, password }),
   });
   const data = (await res.json()) as ServerAccountResponse & { error?: string };
   if (!res.ok) {
     throw new Error(data.error || 'Sign in failed.');
   }
-  const rolled = rolloverExpiredDailyPlan(
-    normalizeDailyPlan(data.account.activeDailyPlan),
-    normalizeDailyHistory(data.account.dailyHistory)
-  );
   return {
     token: data.token,
-    account: {
-      ...data.account,
-      studyCards: normalizeStudyCards(data.account.studyCards),
-      goals: normalizeGoals(data.account.goals),
-      checklistTables: normalizeChecklistTables(data.account.checklistTables),
-      activeDayLog: normalizeDayLogEntry(data.account.activeDayLog),
-      dayLogHistory: normalizeDayLogHistory(data.account.dayLogHistory),
-      cycleLogs: normalizeCycleLogs(data.account.cycleLogs),
-      activeDailyPlan: rolled.activeDailyPlan,
-      dailyHistory: rolled.dailyHistory,
-      gamification: normalizeGamification(data.account.gamification),
-    },
+    account: normalizeServerAccount(data.account),
   };
 }
 
-export async function fetchCurrentAccount(token: string): Promise<ServerAccountResponse['account'] | null> {
+export async function loginWithSyncKey(
+  username: string,
+  syncKey: string
+): Promise<ServerAccountResponse> {
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'FocusPair',
+    },
+    body: JSON.stringify({ username, syncKey }),
+  });
+  const data = (await res.json()) as ServerAccountResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || 'Sync Key sign in failed.');
+  }
+  return {
+    token: data.token,
+    account: normalizeServerAccount(data.account),
+  };
+}
+
+export async function loginWithPairCode(
+  username: string,
+  pairCode: string
+): Promise<ServerAccountResponse> {
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'FocusPair',
+    },
+    body: JSON.stringify({ username, pairCode }),
+  });
+  const data = (await res.json()) as ServerAccountResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || 'Device Pair Code sign in failed.');
+  }
+  return {
+    token: data.token,
+    account: normalizeServerAccount(data.account),
+  };
+}
+
+export async function recoverLegacyDeviceAccount(
+  username: string,
+  accountId: string
+): Promise<ServerAccountResponse> {
+  const res = await fetch('/api/auth/reconnect-device', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'FocusPair',
+    },
+    body: JSON.stringify({ username, accountId }),
+  });
+  const data = (await res.json()) as ServerAccountResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || 'Could not reconnect this account automatically.');
+  }
+  return {
+    token: data.token,
+    syncKey: data.syncKey,
+    account: normalizeServerAccount(data.account),
+  };
+}
+
+export async function logoutAccount(token?: string | null): Promise<void> {
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'X-Requested-With': 'FocusPair',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+  } catch {
+    // Ignore network logout errors
+  }
+}
+
+export async function requestDevicePairCode(token?: string | null): Promise<{
+  username: string;
+  pairCode: string;
+  expiresAt: number;
+}> {
+  const res = await fetch('/api/auth/pair-code', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'FocusPair',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  const data = (await res.json()) as {
+    username: string;
+    pairCode: string;
+    expiresAt: number;
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(data.error || 'Could not generate a 6-digit pair code.');
+  }
+  return {
+    username: data.username,
+    pairCode: data.pairCode,
+    expiresAt: data.expiresAt,
+  };
+}
+
+export async function rotateAccountSyncKey(token?: string | null): Promise<{
+  username: string;
+  syncKey: string;
+  updatedAt: number;
+}> {
+  const res = await fetch('/api/auth/sync-key/rotate', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'FocusPair',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  const data = (await res.json()) as {
+    username: string;
+    syncKey: string;
+    updatedAt: number;
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(data.error || 'Could not generate a new Sync Key.');
+  }
+  return {
+    username: data.username,
+    syncKey: data.syncKey,
+    updatedAt: data.updatedAt,
+  };
+}
+
+export async function fetchCurrentAccount(
+  token?: string | null
+): Promise<ServerAccountResponse | null> {
   try {
     const res = await fetch('/api/account/me', {
-      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as { account: ServerAccountResponse['account'] };
-    const rolled = rolloverExpiredDailyPlan(
-      normalizeDailyPlan(data.account.activeDailyPlan),
-      normalizeDailyHistory(data.account.dailyHistory)
-    );
+    const data = (await res.json()) as {
+      token?: string;
+      account: ServerAccountResponse['account'];
+    };
     return {
-      ...data.account,
-      studyCards: normalizeStudyCards(data.account.studyCards),
-      goals: normalizeGoals(data.account.goals),
-      checklistTables: normalizeChecklistTables(data.account.checklistTables),
-      activeDayLog: normalizeDayLogEntry(data.account.activeDayLog),
-      dayLogHistory: normalizeDayLogHistory(data.account.dayLogHistory),
-      cycleLogs: normalizeCycleLogs(data.account.cycleLogs),
-      activeDailyPlan: rolled.activeDailyPlan,
-      dailyHistory: rolled.dailyHistory,
-      gamification: normalizeGamification(data.account.gamification),
+      token: data.token,
+      account: normalizeServerAccount(data.account),
     };
   } catch {
     return null;
@@ -892,7 +1629,7 @@ export async function fetchCurrentAccount(token: string): Promise<ServerAccountR
 }
 
 export async function syncAccountCards(
-  token: string,
+  token: string | null,
   cards: StudySessionCard[],
   keepalive = false,
   goals?: GoalPlan[],
@@ -905,9 +1642,11 @@ export async function syncAccountCards(
   try {
     const res = await fetch('/api/account/sync', {
       method: 'PUT',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
+        'X-Requested-With': 'FocusPair',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       keepalive,
       body: JSON.stringify({
@@ -925,7 +1664,16 @@ export async function syncAccountCards(
               })),
             }
           : {}),
+        ...(daySync?.customDateLogs !== undefined
+          ? { customDateLogs: daySync.customDateLogs }
+          : {}),
+        ...(daySync?.dateRangeLogs !== undefined
+          ? { dateRangeLogs: daySync.dateRangeLogs }
+          : {}),
         ...(daySync?.cycleLogs !== undefined ? { cycleLogs: daySync.cycleLogs } : {}),
+        ...(daySync?.scheduledDailyPlans !== undefined
+          ? { scheduledDailyPlans: daySync.scheduledDailyPlans }
+          : {}),
         ...(gamification !== undefined ? { gamification } : {}),
         ...(activeDailyPlan !== undefined ? { activeDailyPlan } : {}),
         ...(dailyHistory !== undefined ? { dailyHistory } : {}),

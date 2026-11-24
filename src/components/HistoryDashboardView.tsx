@@ -1031,6 +1031,13 @@ export function HistoryDashboardView({
                 const noteCount = Object.values(entry.hourNotes ?? {}).filter(
                   (v) => v && v.trim().length > 0
                 ).length;
+                const taskBlockStrokes =
+                  (entry.taskStrokes?.length ?? 0) +
+                  (entry.taskBlocks ?? []).reduce((sum, b) => sum + b.strokes.length, 0);
+                const customBlockStrokes = (entry.customBlocks ?? []).reduce(
+                  (sum, b) => sum + b.strokes.length,
+                  0
+                );
 
                 return (
                   <article
@@ -1062,6 +1069,8 @@ export function HistoryDashboardView({
                         </h3>
                         <p className="font-mono-tabular mt-0.5 text-[11px] text-slate-400">
                           {formatDateKeyLabel(entry.dateKey)} · {entry.strokes.length} strokes
+                          {taskBlockStrokes > 0 ? ` · ${taskBlockStrokes} task ink` : ''}
+                          {customBlockStrokes > 0 ? ` · ${customBlockStrokes} custom ink` : ''}
                           {noteCount > 0 ? ` · ${noteCount} tags` : ''}
                         </p>
                         {entry.cycleSummary && (

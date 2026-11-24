@@ -244,22 +244,28 @@ function broadcastRoomState(room: StudyRoom) {
   }
 }
 
-// Persistent server-side Username + Password account storage (no external email provider needed)
+// Persistent server-side Username + Passwordless (Sync Key / Pair Code) or Password account storage
 interface StoredAccount {
   id: string;
   username: string;
   usernameLower: string;
-  passwordSalt: string;
-  passwordHash: string;
+  passwordSalt?: string;
+  passwordHash?: string;
+  syncKeySalt?: string;
+  syncKeyHash?: string;
   studyCards: unknown[];
   goals?: unknown[];
   checklistTables?: unknown[];
   activeDayLog?: Record<string, unknown>;
   dayLogHistory?: unknown[];
+  customDateLogs?: unknown[];
+  dateRangeLogs?: unknown[];
   cycleLogs?: Record<string, unknown>;
   activeDailyPlan?: Record<string, unknown>;
   dailyHistory?: unknown[];
+  scheduledDailyPlans?: Record<string, unknown>;
   gamification?: Record<string, unknown>;
+  cookieIssuedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -275,6 +281,8 @@ function ensureDataDir() {
 }
 
 function loadOrCreateAuthSecret(): string {
+  const envSecret = (process.env.AUTH_SECRET ?? '').trim();
+  if (envSecret.length >= 32) return envSecret;
   try {
     ensureDataDir();
     if (fs.existsSync(AUTH_SECRET_FILE)) {
@@ -285,7 +293,7 @@ function loadOrCreateAuthSecret(): string {
     fs.writeFileSync(AUTH_SECRET_FILE, fresh, 'utf8');
     return fresh;
   } catch {
-    return process.env.AUTH_SECRET || 'focuspair-fallback-session-secret';
+    return crypto.randomBytes(32).toString('hex');
   }
 }
 
@@ -323,18 +331,139 @@ function saveAccountsToDisk() {
 
 loadAccountsFromDisk();
 
-function hashPassword(password: string, saltHex?: string): { salt: string; hash: string } {
+function hashSecret(secret: string, saltHex?: string): { salt: string; hash: string } {
   const salt = saltHex ?? crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  const hash = crypto.scryptSync(secret, salt, 64).toString('hex');
   return { salt, hash };
 }
 
-function verifyPassword(password: string, saltHex: string, expectedHashHex: string): boolean {
+function verifySecret(secret: string, saltHex?: string, expectedHashHex?: string): boolean {
+  if (!secret || !saltHex || !expectedHashHex) return false;
   try {
-    const derived = crypto.scryptSync(password, saltHex, 64);
+    const derived = crypto.scryptSync(secret, saltHex, 64);
     const expected = Buffer.from(expectedHashHex, 'hex');
     if (derived.length !== expected.length) return false;
     return crypto.timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
+}
+
+function generateReadableSyncKey(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.randomBytes(16);
+  const chars = Array.from(bytes, (b) => alphabet[b % alphabet.length]);
+  return `FP-${chars.slice(0, 4).join('')}-${chars.slice(4, 8).join('')}-${chars.slice(8, 12).join('')}-${chars.slice(12, 16).join('')}`;
+}
+
+function normalizeSyncKeyInput(raw: string): string {
+  return raw.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+}
+
+interface PendingPairCode {
+  accountId: string;
+  usernameLower: string;
+  codeSalt: string;
+  codeHash: string;
+  expiresAt: number;
+  attempts: number;
+}
+
+const pendingPairCodes = new Map<string, PendingPairCode>();
+const loginFailureTracker = new Map<string, { count: number; resetAt: number }>();
+
+function checkLoginRateLimit(key: string): boolean {
+  const now = Date.now();
+  const rec = loginFailureTracker.get(key);
+  if (!rec) return true;
+  if (now > rec.resetAt) {
+    loginFailureTracker.delete(key);
+    return true;
+  }
+  return rec.count < 12;
+}
+
+function recordLoginFailure(key: string): void {
+  const now = Date.now();
+  const rec = loginFailureTracker.get(key);
+  if (!rec || now > rec.resetAt) {
+    loginFailureTracker.set(key, { count: 1, resetAt: now + 10 * 60_000 });
+  } else {
+    rec.count += 1;
+  }
+}
+
+function buildPublicAccountPayload(account: StoredAccount) {
+  return {
+    id: account.id,
+    username: account.username,
+    hasPassword: Boolean(account.passwordHash),
+    hasSyncKey: Boolean(account.syncKeyHash),
+    createdAt: account.createdAt,
+    updatedAt: account.updatedAt,
+    studyCards: account.studyCards,
+    goals: account.goals ?? [],
+    checklistTables: account.checklistTables ?? [],
+    activeDayLog: account.activeDayLog,
+    dayLogHistory: account.dayLogHistory ?? [],
+    customDateLogs: account.customDateLogs ?? [],
+    dateRangeLogs: account.dateRangeLogs ?? [],
+    cycleLogs: account.cycleLogs ?? {},
+    activeDailyPlan: account.activeDailyPlan,
+    dailyHistory: account.dailyHistory ?? [],
+    scheduledDailyPlans: account.scheduledDailyPlans ?? {},
+    gamification: account.gamification,
+  };
+}
+
+const SESSION_COOKIE_NAME = 'fp_session';
+
+function parseSessionCookie(req: Request): string | null {
+  const raw = req.headers.cookie;
+  if (!raw || typeof raw !== 'string') return null;
+  for (const part of raw.split(';')) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = part.slice(0, eqIdx).trim();
+    if (key === SESSION_COOKIE_NAME) {
+      try {
+        return decodeURIComponent(part.slice(eqIdx + 1).trim()) || null;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function setSessionCookie(res: Response, token: string): void {
+  res.cookie(SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    partitioned: true,
+    path: '/',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+}
+
+function clearSessionCookie(res: Response): void {
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    partitioned: true,
+    path: '/',
+  });
+}
+
+function isSameOriginOrCustomHeader(req: Request): boolean {
+  if (req.headers['x-requested-with'] === 'FocusPair') return true;
+  const origin = req.headers.origin;
+  const host = (req.headers['x-forwarded-host'] as string | undefined) ?? req.headers.host;
+  if (!origin || !host) return false;
+  try {
+    return new URL(origin).host === host;
   } catch {
     return false;
   }
@@ -382,11 +511,19 @@ function extractBearerToken(req: Request): string | null {
   if (typeof header === 'string' && header.startsWith('Bearer ')) {
     return header.slice(7).trim();
   }
+  const cookieToken = parseSessionCookie(req);
+  if (cookieToken) {
+    const isRead = req.method === 'GET' || req.method === 'HEAD';
+    if (isRead || isSameOriginOrCustomHeader(req)) {
+      return cookieToken;
+    }
+  }
   return null;
 }
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '12mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
@@ -405,6 +542,7 @@ async function startServer() {
   app.post('/api/auth/register', (req: Request, res: Response) => {
     const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
     const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+    const passwordless = Boolean(req.body?.passwordless) || rawPassword.length === 0;
     const initialCards = Array.isArray(req.body?.studyCards) ? req.body.studyCards : [];
     const initialGoals = Array.isArray(req.body?.goals) ? req.body.goals : [];
     const initialChecklists = Array.isArray(req.body?.checklistTables)
@@ -417,6 +555,12 @@ async function startServer() {
     const initialDayLogHistory = Array.isArray(req.body?.dayLogHistory)
       ? req.body.dayLogHistory
       : [];
+    const initialCustomDateLogs = Array.isArray(req.body?.customDateLogs)
+      ? req.body.customDateLogs
+      : [];
+    const initialDateRangeLogs = Array.isArray(req.body?.dateRangeLogs)
+      ? req.body.dateRangeLogs
+      : [];
     const initialCycleLogs =
       req.body?.cycleLogs && typeof req.body.cycleLogs === 'object'
         ? (req.body.cycleLogs as Record<string, unknown>)
@@ -428,6 +572,10 @@ async function startServer() {
     const initialDailyHistory = Array.isArray(req.body?.dailyHistory)
       ? req.body.dailyHistory
       : [];
+    const initialScheduledDailyPlans =
+      req.body?.scheduledDailyPlans && typeof req.body.scheduledDailyPlans === 'object'
+        ? (req.body.scheduledDailyPlans as Record<string, unknown>)
+        : undefined;
     const initialGamification =
       req.body?.gamification && typeof req.body.gamification === 'object'
         ? (req.body.gamification as Record<string, unknown>)
@@ -437,7 +585,7 @@ async function startServer() {
       res.status(400).json({ error: 'Name must be between 2 and 40 characters.' });
       return;
     }
-    if (rawPassword.length < 4 || rawPassword.length > 120) {
+    if (!passwordless && (rawPassword.length < 4 || rawPassword.length > 120)) {
       res.status(400).json({ error: 'Password must be at least 4 characters.' });
       return;
     }
@@ -445,28 +593,37 @@ async function startServer() {
     const key = rawUsername.toLowerCase();
     if (accountStore.has(key)) {
       res.status(409).json({
-        error: 'This username is already taken. Sign in with your password or choose another name.',
+        error:
+          'This username already exists. Sign in with your Device Pair Code, Sync Key, or password—or recover your existing session.',
       });
       return;
     }
 
-    const { salt, hash } = hashPassword(rawPassword);
+    const pwdCreds = !passwordless && rawPassword.length >= 4 ? hashSecret(rawPassword) : null;
+    const syncKey = generateReadableSyncKey();
+    const syncCreds = hashSecret(syncKey);
+
     const now = Date.now();
     const account: StoredAccount = {
-      id: `acc-${now.toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
+      id: `acc-${now.toString(36)}-${crypto.randomBytes(6).toString('hex')}`,
       username: rawUsername,
       usernameLower: key,
-      passwordSalt: salt,
-      passwordHash: hash,
+      ...(pwdCreds ? { passwordSalt: pwdCreds.salt, passwordHash: pwdCreds.hash } : {}),
+      syncKeySalt: syncCreds.salt,
+      syncKeyHash: syncCreds.hash,
       studyCards: initialCards,
       goals: initialGoals,
       checklistTables: initialChecklists,
       ...(initialActiveDayLog ? { activeDayLog: initialActiveDayLog } : {}),
       dayLogHistory: initialDayLogHistory,
+      customDateLogs: initialCustomDateLogs,
+      dateRangeLogs: initialDateRangeLogs,
       ...(initialCycleLogs ? { cycleLogs: initialCycleLogs } : {}),
       ...(initialDailyPlan ? { activeDailyPlan: initialDailyPlan } : {}),
       dailyHistory: initialDailyHistory,
+      ...(initialScheduledDailyPlans ? { scheduledDailyPlans: initialScheduledDailyPlans } : {}),
       ...(initialGamification ? { gamification: initialGamification } : {}),
+      cookieIssuedAt: now,
       createdAt: now,
       updatedAt: now,
     };
@@ -475,55 +632,200 @@ async function startServer() {
     saveAccountsToDisk();
 
     const token = issueAuthToken(account);
+    setSessionCookie(res, token);
     res.status(201).json({
       token,
-      account: {
-        id: account.id,
-        username: account.username,
-        createdAt: account.createdAt,
-        updatedAt: account.updatedAt,
-        studyCards: account.studyCards,
-        goals: account.goals ?? [],
-        checklistTables: account.checklistTables ?? [],
-        activeDayLog: account.activeDayLog,
-        dayLogHistory: account.dayLogHistory ?? [],
-        cycleLogs: account.cycleLogs ?? {},
-        activeDailyPlan: account.activeDailyPlan,
-        dailyHistory: account.dailyHistory ?? [],
-        gamification: account.gamification,
-      },
+      syncKey,
+      account: buildPublicAccountPayload(account),
     });
   });
 
   app.post('/api/auth/login', (req: Request, res: Response) => {
     const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
     const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+    const rawSyncKey = typeof req.body?.syncKey === 'string' ? normalizeSyncKeyInput(req.body.syncKey) : '';
+    const rawPairCode =
+      typeof req.body?.pairCode === 'string' ? req.body.pairCode.replace(/\D/g, '').trim() : '';
     const key = rawUsername.toLowerCase();
+    const rateKey = `${req.ip || 'unknown'}:${key}`;
 
-    const account = accountStore.get(key);
-    if (!account || !verifyPassword(rawPassword, account.passwordSalt, account.passwordHash)) {
-      res.status(401).json({ error: 'Incorrect username or password.' });
+    if (!key || !checkLoginRateLimit(rateKey)) {
+      res.status(429).json({ error: 'Too many sign-in attempts. Please wait a few minutes and try again.' });
       return;
     }
 
+    const account = accountStore.get(key);
+    if (!account) {
+      recordLoginFailure(rateKey);
+      res.status(401).json({ error: 'No account found with that username.' });
+      return;
+    }
+
+    if (rawPairCode) {
+      const pending = pendingPairCodes.get(key);
+      if (!pending || pending.accountId !== account.id || Date.now() > pending.expiresAt) {
+        pendingPairCodes.delete(key);
+        recordLoginFailure(rateKey);
+        res.status(401).json({
+          error: 'Device link code expired or not active. Generate a fresh 6-digit code from your signed-in device.',
+        });
+        return;
+      }
+      if (!verifySecret(rawPairCode, pending.codeSalt, pending.codeHash)) {
+        pending.attempts += 1;
+        recordLoginFailure(rateKey);
+        if (pending.attempts >= 5) {
+          pendingPairCodes.delete(key);
+          res.status(401).json({ error: 'Too many invalid code tries. Please generate a new 6-digit code.' });
+          return;
+        }
+        res.status(401).json({ error: 'Incorrect 6-digit device link code.' });
+        return;
+      }
+      pendingPairCodes.delete(key);
+    } else if (rawSyncKey) {
+      if (!verifySecret(rawSyncKey, account.syncKeySalt, account.syncKeyHash)) {
+        recordLoginFailure(rateKey);
+        res.status(401).json({ error: 'Invalid Sync Key for this username.' });
+        return;
+      }
+    } else if (rawPassword) {
+      if (!verifySecret(rawPassword, account.passwordSalt, account.passwordHash)) {
+        recordLoginFailure(rateKey);
+        res.status(401).json({
+          error: 'Incorrect password. Try your 6-digit Device Code or Sync Key instead.',
+        });
+        return;
+      }
+    } else {
+      res.status(400).json({ error: 'Provide a Device Pair Code, Sync Key, or password.' });
+      return;
+    }
+
+    loginFailureTracker.delete(rateKey);
+    if (!account.cookieIssuedAt) {
+      account.cookieIssuedAt = Date.now();
+      accountStore.set(account.usernameLower, account);
+      saveAccountsToDisk();
+    }
     const token = issueAuthToken(account);
+    setSessionCookie(res, token);
     res.json({
       token,
-      account: {
-        id: account.id,
-        username: account.username,
-        createdAt: account.createdAt,
-        updatedAt: account.updatedAt,
-        studyCards: account.studyCards,
-        goals: account.goals ?? [],
-        checklistTables: account.checklistTables ?? [],
-        activeDayLog: account.activeDayLog,
-        dayLogHistory: account.dayLogHistory ?? [],
-        cycleLogs: account.cycleLogs ?? {},
-        activeDailyPlan: account.activeDailyPlan,
-        dailyHistory: account.dailyHistory ?? [],
-        gamification: account.gamification,
-      },
+      account: buildPublicAccountPayload(account),
+    });
+  });
+
+  // One-time secure reconnection for accounts created before persistent cookies / Sync Keys
+  app.post('/api/auth/reconnect-device', (req: Request, res: Response) => {
+    const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const rawAccountId = typeof req.body?.accountId === 'string' ? req.body.accountId.trim() : '';
+    const key = rawUsername.toLowerCase();
+    const rateKey = `reconnect:${req.ip || 'unknown'}:${key}`;
+
+    if (!key || !rawAccountId || !checkLoginRateLimit(rateKey)) {
+      res.status(429).json({
+        error: 'Too many reconnection attempts. Please wait a few minutes and try again.',
+      });
+      return;
+    }
+
+    const account = accountStore.get(key);
+    if (!account) {
+      recordLoginFailure(rateKey);
+      res.status(404).json({
+        error: 'No matching cloud account was found on the server. Use Sync This Account to create one.',
+      });
+      return;
+    }
+
+    const a = Buffer.from(rawAccountId);
+    const b = Buffer.from(account.id);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      recordLoginFailure(rateKey);
+      res.status(401).json({ error: 'Device profile ID did not match this account.' });
+      return;
+    }
+
+    if (account.cookieIssuedAt && account.syncKeyHash) {
+      res.status(403).json({
+        error: 'This account already has an active Sync Key. Use your Sync Key or a 6-Digit Device Code from your signed-in browser.',
+      });
+      return;
+    }
+
+    loginFailureTracker.delete(rateKey);
+    const syncKey = generateReadableSyncKey();
+    const { salt, hash } = hashSecret(syncKey);
+    const now = Date.now();
+    account.syncKeySalt = salt;
+    account.syncKeyHash = hash;
+    account.cookieIssuedAt = now;
+    account.updatedAt = now;
+    accountStore.set(account.usernameLower, account);
+    saveAccountsToDisk();
+
+    const token = issueAuthToken(account);
+    setSessionCookie(res, token);
+    res.json({
+      token,
+      syncKey,
+      account: buildPublicAccountPayload(account),
+    });
+  });
+
+  app.post('/api/auth/logout', (_req: Request, res: Response) => {
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/auth/pair-code', (req: Request, res: Response) => {
+    const token = extractBearerToken(req);
+    const account = token ? verifyAuthToken(token) : null;
+    if (!account) {
+      res.status(401).json({ error: 'Sign in first to generate a device link code.' });
+      return;
+    }
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const { salt, hash } = hashSecret(code);
+    const expiresAt = Date.now() + 10 * 60_000;
+    pendingPairCodes.set(account.usernameLower, {
+      accountId: account.id,
+      usernameLower: account.usernameLower,
+      codeSalt: salt,
+      codeHash: hash,
+      expiresAt,
+      attempts: 0,
+    });
+
+    res.json({
+      username: account.username,
+      pairCode: code,
+      expiresAt,
+    });
+  });
+
+  app.post('/api/auth/sync-key/rotate', (req: Request, res: Response) => {
+    const token = extractBearerToken(req);
+    const account = token ? verifyAuthToken(token) : null;
+    if (!account) {
+      res.status(401).json({ error: 'Sign in first to generate a personal Sync Key.' });
+      return;
+    }
+
+    const syncKey = generateReadableSyncKey();
+    const { salt, hash } = hashSecret(syncKey);
+    account.syncKeySalt = salt;
+    account.syncKeyHash = hash;
+    account.updatedAt = Date.now();
+    accountStore.set(account.usernameLower, account);
+    saveAccountsToDisk();
+
+    res.json({
+      username: account.username,
+      syncKey,
+      updatedAt: account.updatedAt,
     });
   });
 
@@ -535,22 +837,10 @@ async function startServer() {
       return;
     }
 
+    const freshToken = issueAuthToken(account);
     res.json({
-      account: {
-        id: account.id,
-        username: account.username,
-        createdAt: account.createdAt,
-        updatedAt: account.updatedAt,
-        studyCards: account.studyCards,
-        goals: account.goals ?? [],
-        checklistTables: account.checklistTables ?? [],
-        activeDayLog: account.activeDayLog,
-        dayLogHistory: account.dayLogHistory ?? [],
-        cycleLogs: account.cycleLogs ?? {},
-        activeDailyPlan: account.activeDailyPlan,
-        dailyHistory: account.dailyHistory ?? [],
-        gamification: account.gamification,
-      },
+      token: freshToken,
+      account: buildPublicAccountPayload(account),
     });
   });
 
@@ -582,6 +872,12 @@ async function startServer() {
     if (Array.isArray(req.body?.dayLogHistory)) {
       account.dayLogHistory = req.body.dayLogHistory;
     }
+    if (Array.isArray(req.body?.customDateLogs)) {
+      account.customDateLogs = req.body.customDateLogs;
+    }
+    if (Array.isArray(req.body?.dateRangeLogs)) {
+      account.dateRangeLogs = req.body.dateRangeLogs;
+    }
     if (req.body?.cycleLogs && typeof req.body.cycleLogs === 'object') {
       account.cycleLogs = req.body.cycleLogs as Record<string, unknown>;
     }
@@ -590,6 +886,9 @@ async function startServer() {
     }
     if (Array.isArray(req.body?.dailyHistory)) {
       account.dailyHistory = req.body.dailyHistory;
+    }
+    if (req.body?.scheduledDailyPlans && typeof req.body.scheduledDailyPlans === 'object') {
+      account.scheduledDailyPlans = req.body.scheduledDailyPlans as Record<string, unknown>;
     }
     if (req.body?.gamification && typeof req.body.gamification === 'object') {
       account.gamification = req.body.gamification as Record<string, unknown>;

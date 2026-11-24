@@ -32,6 +32,7 @@ interface CoStudyRoomPanelProps {
     durationSeconds: number;
     recordedAt: number;
   }) => void;
+  compact?: boolean;
 }
 
 function formatSeconds(total: number): string {
@@ -68,6 +69,7 @@ export function CoStudyRoomPanel({
   onLeaveRoom,
   onCameraStreamChange,
   onRecordingSaved,
+  compact = false,
 }: CoStudyRoomPanelProps) {
   const selfVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -271,7 +273,9 @@ export function CoStudyRoomPanel({
   return (
     <section
       aria-label="Self-View Camera and Friend Study Room"
-      className="glass-panel flex min-h-[250px] flex-1 flex-col overflow-hidden rounded-xl"
+      className={`glass-panel flex flex-1 flex-col overflow-hidden rounded-xl ${
+        compact ? 'min-h-[145px] lg:min-h-[180px]' : 'min-h-[175px] lg:min-h-[240px]'
+      }`}
     >
       {/* Top Bar: Share Friend Link + Join + Camera Controls */}
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 border-b border-cyan-200/[0.08] px-3 py-2">
@@ -462,7 +466,11 @@ export function CoStudyRoomPanel({
       )}
 
       {/* Camera / Friend Co-Study Viewport */}
-      <div className="relative min-h-[200px] flex-1 overflow-hidden bg-[#040711]/70">
+      <div
+        className={`relative flex-1 overflow-hidden bg-[#040711]/70 ${
+          compact ? 'min-h-[100px] lg:min-h-[140px]' : 'min-h-[130px] lg:min-h-[190px]'
+        }`}
+      >
         {/* Self-view video (Fit by default so full face & head stay uncropped) */}
         <video
           ref={selfVideoRef}

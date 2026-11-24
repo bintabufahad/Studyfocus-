@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Eye, GripVertical, Minimize2, Sparkles, Video } from 'lucide-react';
 import { CompanionStage } from './components/CompanionStage';
 import { ChecklistTableSection } from './components/ChecklistTableSection';
 import { CoStudyRoomPanel, fallbackCopyText } from './components/CoStudyRoomPanel';
@@ -19,8 +20,10 @@ import type {
   AppView,
   ChecklistTableRecord,
   CompanionPose,
+  CustomDateLogSheet,
   CycleDayLog,
   DailyPlanRecord,
+  DateRangeLogSheet,
   DayLogEntry,
   GamificationStats,
   GoalPlan,
@@ -34,6 +37,7 @@ import type {
   TimerControlAction,
   TimerSettings,
   UserProfile,
+  VideoPlaylistGroup,
   WorkspacePanelMode,
 } from './types';
 import {
@@ -44,20 +48,29 @@ import {
   DEFAULT_GAMIFICATION_STATS,
   DEFAULT_TIMER_SETTINGS,
   fetchCurrentAccount,
+  hydrateDailyPlanWithGoalsAndSchedule,
   loadActiveProfileId,
   loadAuthToken,
   loadProfiles,
   loadTimerSnapshot,
   loginAccount,
+  loginWithPairCode,
+  loginWithSyncKey,
+  logoutAccount,
   normalizeStudyCards,
+  recoverLegacyDeviceAccount,
   registerAccount,
+  requestDevicePairCode,
+  resolveMatchingStepIndexForDate,
   rolloverExpiredDailyPlan,
+  rotateAccountSyncKey,
   saveActiveProfileId,
   saveAuthToken,
   saveProfiles,
   saveTimerSnapshot,
   syncAccountCards,
   toLocalDateKey,
+  type ServerAccountResponse,
 } from './utils/profileStorage';
 import { applyGoalCompletionReward, computeCyclePhaseForDay } from './utils/goalRewards';
 import { playCueSound } from './utils/soundCues';
@@ -164,15 +177,42 @@ export default function App() {
     () => activeProfile?.dayLogHistory ?? [],
     [activeProfile?.dayLogHistory]
   );
+  const customDateLogs = useMemo(
+    () => activeProfile?.customDateLogs ?? [],
+    [activeProfile?.customDateLogs]
+  );
+  const dateRangeLogs = useMemo(
+    () => activeProfile?.dateRangeLogs ?? [],
+    [activeProfile?.dateRangeLogs]
+  );
   const cycleLogs = useMemo(
     () => activeProfile?.cycleLogs ?? {},
     [activeProfile?.cycleLogs]
+  );
+  const scheduledDailyPlans = useMemo(
+    () => activeProfile?.scheduledDailyPlans ?? {},
+    [activeProfile?.scheduledDailyPlans]
   );
   const gamification = activeProfile?.gamification ?? DEFAULT_GAMIFICATION_STATS;
 
   const [activeView, setActiveView] = useState<AppView>('hub');
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const [panelMode, setPanelMode] = useState<WorkspacePanelMode>('focus');
+
+  const [mediaPanePct, setMediaPanePct] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem('focuspair.mediaPanePct.v1'));
+      if (Number.isFinite(saved) && saved >= 18 && saved <= 48) {
+        return Math.round(saved / 2) * 2;
+      }
+    } catch {
+      // Ignore storage read errors
+    }
+    return 36;
+  });
+  const [isMediaPaneCollapsed, setIsMediaPaneCollapsed] = useState(false);
+  const workspaceContainerRef = useRef<HTMLElement | null>(null);
+  const isDraggingDividerRef = useRef(false);
 
   const [roomId, setRoomId] = useState<string | null>(
     () => initialInviteRef.current?.roomId ?? null
@@ -195,7 +235,32 @@ export default function App() {
 
   const timerSettings = activeCard?.timerSettings ?? DEFAULT_TIMER_SETTINGS;
   const tasks = activeCard?.tasks ?? [];
-  const playlist = activeCard?.playlist ?? [];
+
+  const cardPlaylists = useMemo<VideoPlaylistGroup[]>(() => {
+    if (!activeCard) return [];
+    if (activeCard.playlists && activeCard.playlists.length > 0) {
+      return activeCard.playlists;
+    }
+    return [
+      {
+        id: `pl-${activeCard.id}`,
+        title: 'Main Playlist',
+        items: activeCard.playlist ?? [],
+        activeVideoId: activeCard.activeVideoId ?? null,
+        trimIntroSeconds: activeCard.videoTrimIntroSeconds ?? 0,
+        trimOutroSeconds: activeCard.videoTrimOutroSeconds ?? 0,
+        createdAt: activeCard.createdAt,
+      },
+    ];
+  }, [activeCard]);
+
+  const activePlaylistGroup = useMemo<VideoPlaylistGroup | null>(() => {
+    if (cardPlaylists.length === 0) return null;
+    return (
+      cardPlaylists.find((p) => p.id === activeCard?.activePlaylistId) ??
+      cardPlaylists[0]
+    );
+  }, [activeCard?.activePlaylistId, cardPlaylists]);
 
   const totalLogsCount = useMemo(
     () => studyCards.reduce((sum, c) => sum + c.sessionLogs.length, 0),
@@ -311,14 +376,21 @@ export default function App() {
   }, [authToken]);
 
   const pullCloudAccount = useCallback(
-    async (token: string, forceReplace = false) => {
-      const account = await fetchCurrentAccount(token);
-      if (!account) {
-        if (forceReplace) {
+    async (token: string | null, forceReplace = false, openModalOnFailure = false) => {
+      const res = await fetchCurrentAccount(token);
+      if (!res) {
+        if (openModalOnFailure) {
           setAuthToken(null);
           setIsProfileModalOpen(true);
+        } else if (token) {
+          setAuthToken(null);
         }
         return;
+      }
+
+      const { token: freshToken, account } = res;
+      if (freshToken && freshToken !== token) {
+        setAuthToken(freshToken);
       }
 
       if (!forceReplace && hasUnsyncedCloudRef.current) return;
@@ -338,7 +410,10 @@ export default function App() {
           checklistTables: account.checklistTables ?? [],
           activeDayLog: account.activeDayLog ?? createDefaultDayLog(),
           dayLogHistory: account.dayLogHistory ?? [],
+          customDateLogs: account.customDateLogs ?? [],
+          dateRangeLogs: account.dateRangeLogs ?? [],
           cycleLogs: account.cycleLogs ?? {},
+          scheduledDailyPlans: account.scheduledDailyPlans ?? {},
           activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
           dailyHistory: account.dailyHistory ?? [],
           gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
@@ -354,10 +429,10 @@ export default function App() {
     []
   );
 
+  // Restore persistent HttpOnly cookie session (or token) cleanly on reload
   useEffect(() => {
-    if (!authToken) return;
-    void pullCloudAccount(authToken, true);
-  }, [authToken, pullCloudAccount]);
+    void pullCloudAccount(loadAuthToken(), true, false);
+  }, [pullCloudAccount]);
 
   const cloudSyncCards = activeProfile?.isCloudAccount ? activeProfile.studyCards : null;
   const cloudSyncGoals = activeProfile?.isCloudAccount ? activeProfile.goals ?? [] : null;
@@ -374,8 +449,17 @@ export default function App() {
   const cloudSyncDayLogHistory = activeProfile?.isCloudAccount
     ? activeProfile.dayLogHistory ?? []
     : null;
+  const cloudSyncCustomDateLogs = activeProfile?.isCloudAccount
+    ? activeProfile.customDateLogs ?? []
+    : null;
+  const cloudSyncDateRangeLogs = activeProfile?.isCloudAccount
+    ? activeProfile.dateRangeLogs ?? []
+    : null;
   const cloudSyncCycleLogs = activeProfile?.isCloudAccount
     ? activeProfile.cycleLogs ?? {}
+    : null;
+  const cloudSyncScheduledDailyPlans = activeProfile?.isCloudAccount
+    ? activeProfile.scheduledDailyPlans ?? {}
     : null;
   const cloudSyncGamification = activeProfile?.isCloudAccount
     ? activeProfile.gamification ?? DEFAULT_GAMIFICATION_STATS
@@ -402,7 +486,10 @@ export default function App() {
         {
           activeDayLog: cloudSyncDayLog ?? undefined,
           dayLogHistory: cloudSyncDayLogHistory ?? undefined,
+          customDateLogs: cloudSyncCustomDateLogs ?? undefined,
+          dateRangeLogs: cloudSyncDateRangeLogs ?? undefined,
           cycleLogs: cloudSyncCycleLogs ?? undefined,
+          scheduledDailyPlans: cloudSyncScheduledDailyPlans ?? undefined,
         }
       );
       if (ok) {
@@ -417,6 +504,8 @@ export default function App() {
     authToken,
     cloudSyncCards,
     cloudSyncChecklistTables,
+    cloudSyncCustomDateLogs,
+    cloudSyncDateRangeLogs,
     cloudSyncCycleLogs,
     cloudSyncDaily,
     cloudSyncDailyHistory,
@@ -424,6 +513,7 @@ export default function App() {
     cloudSyncDayLogHistory,
     cloudSyncGamification,
     cloudSyncGoals,
+    cloudSyncScheduledDailyPlans,
   ]);
 
   useEffect(() => {
@@ -441,14 +531,17 @@ export default function App() {
           {
             activeDayLog: activeProfile.activeDayLog,
             dayLogHistory: activeProfile.dayLogHistory ?? [],
+            customDateLogs: activeProfile.customDateLogs ?? [],
+            dateRangeLogs: activeProfile.dateRangeLogs ?? [],
             cycleLogs: activeProfile.cycleLogs ?? {},
+            scheduledDailyPlans: activeProfile.scheduledDailyPlans ?? {},
           }
         );
       }
     };
     const handleFocusRefresh = () => {
       if (authToken && !document.hidden) {
-        void pullCloudAccount(authToken, false);
+        void pullCloudAccount(authToken, false, false);
       }
     };
     window.addEventListener('pagehide', handlePageHide);
@@ -459,21 +552,29 @@ export default function App() {
     };
   }, [activeProfile, authToken, pullCloudAccount]);
 
-  // Automatic Midnight / Day-Change Rollover for Daily Goals
+  // Automatic Midnight / Day-Change Rollover + Scheduled/Synced Goal Hydration
   useEffect(() => {
     const checkDayRollover = () => {
       const todayKey = toLocalDateKey(Date.now());
       setProfiles((prev) => {
         let changed = false;
         const next = prev.map((p) => {
-          if (p.activeDailyPlan && p.activeDailyPlan.dateKey === todayKey) return p;
-          const rolled = rolloverExpiredDailyPlan(p.activeDailyPlan, p.dailyHistory, todayKey);
-          if (!rolled.didRollover && p.activeDailyPlan) return p;
+          const baseRolled = rolloverExpiredDailyPlan(p.activeDailyPlan, p.dailyHistory, todayKey);
+          const hydrated = hydrateDailyPlanWithGoalsAndSchedule(
+            baseRolled.activeDailyPlan,
+            p.goals ?? [],
+            p.scheduledDailyPlans ?? {},
+            todayKey
+          );
+          if (!baseRolled.didRollover && !hydrated.changed && p.activeDailyPlan) {
+            return p;
+          }
           changed = true;
           return {
             ...p,
-            activeDailyPlan: rolled.activeDailyPlan,
-            dailyHistory: rolled.dailyHistory,
+            activeDailyPlan: hydrated.dailyPlan,
+            dailyHistory: baseRolled.dailyHistory,
+            scheduledDailyPlans: hydrated.scheduledDailyPlans,
           };
         });
         return changed ? next : prev;
@@ -486,6 +587,67 @@ export default function App() {
     return () => {
       window.clearInterval(id);
       window.removeEventListener('focus', checkDayRollover);
+    };
+  }, []);
+
+  // Re-hydrate active profile whenever synced goals or scheduled plans arrive for today
+  useEffect(() => {
+    if (!activeProfileId) return;
+    const todayKey = toLocalDateKey(Date.now());
+    const res = hydrateDailyPlanWithGoalsAndSchedule(
+      activeDailyPlan,
+      goals,
+      scheduledDailyPlans,
+      todayKey
+    );
+    if (!res.changed) return;
+    setProfiles((prev) =>
+      prev.map((p) =>
+        p.id === activeProfileId
+          ? {
+              ...p,
+              activeDailyPlan: res.dailyPlan,
+              scheduledDailyPlans: res.scheduledDailyPlans,
+            }
+          : p
+      )
+    );
+  }, [activeDailyPlan, activeProfileId, goals, scheduledDailyPlans]);
+
+  // Pointer drag handler for desktop resizable media column
+  useEffect(() => {
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!isDraggingDividerRef.current || !workspaceContainerRef.current) return;
+      const rect = workspaceContainerRef.current.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const rawPct = ((e.clientX - rect.left) / rect.width) * 100;
+      if (rawPct < 14) {
+        setIsMediaPaneCollapsed(true);
+        return;
+      }
+      setIsMediaPaneCollapsed(false);
+      const snapped = Math.max(18, Math.min(48, Math.round(rawPct / 2) * 2));
+      setMediaPanePct(snapped);
+      try {
+        localStorage.setItem('focuspair.mediaPanePct.v1', String(snapped));
+      } catch {
+        // Ignore storage write errors
+      }
+    };
+    const handlePointerUp = () => {
+      if (isDraggingDividerRef.current) {
+        isDraggingDividerRef.current = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    };
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
     };
   }, []);
 
@@ -1066,7 +1228,59 @@ export default function App() {
     sendPresence(panelMode, isFocusRunning);
   }, [isFocusRunning, panelMode, roomId, sendPresence]);
 
-  const handleRegisterCloudAccount = async (username: string, password: string) => {
+  const applySignedInAccount = useCallback(
+    (
+      token: string | undefined,
+      account: ServerAccountResponse['account'],
+      welcomeCaption: string
+    ) => {
+      if (token) setAuthToken(token);
+      lastCloudUpdatedAtRef.current = account.updatedAt;
+      suppressNextCloudPushRef.current = true;
+
+      const cloudProfile: UserProfile = {
+        id: account.id,
+        name: account.username,
+        createdAt: account.createdAt,
+        studyCards: account.studyCards,
+        goals: account.goals ?? [],
+        checklistTables: account.checklistTables ?? [],
+        activeDayLog: account.activeDayLog ?? createDefaultDayLog(),
+        dayLogHistory: account.dayLogHistory ?? [],
+        customDateLogs: account.customDateLogs ?? [],
+        dateRangeLogs: account.dateRangeLogs ?? [],
+        cycleLogs: account.cycleLogs ?? {},
+        scheduledDailyPlans: account.scheduledDailyPlans ?? {},
+        activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
+        dailyHistory: account.dailyHistory ?? [],
+        gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
+        isCloudAccount: true,
+      };
+      setProfiles((prev) => [
+        cloudProfile,
+        ...prev.filter((p) => !p.isCloudAccount && p.id !== account.id),
+      ]);
+      setActiveProfileId(account.id);
+      setActiveCardId(null);
+      focusEndAtRef.current = null;
+      breakEndAtRef.current = null;
+      nextAlertAtRef.current = null;
+      saveTimerSnapshot(null);
+      setActiveView(initialInviteRef.current ? 'workspace' : 'hub');
+      setIsFocusRunning(false);
+      setIsBreakRunning(false);
+      setIsCheckInRunning(false);
+      setElapsedSessionSeconds(0);
+      setActiveAlertBanner(null);
+      setCompanionCaption(welcomeCaption);
+    },
+    []
+  );
+
+  const handleRegisterCloudAccount = async (
+    username: string,
+    password?: string
+  ): Promise<{ syncKey?: string }> => {
     const starterCards =
       activeProfile && !activeProfile.isCloudAccount ? activeProfile.studyCards : [];
     const starterGoals =
@@ -1090,11 +1304,14 @@ export default function App() {
         ? {
             activeDayLog: activeProfile.activeDayLog ?? createDefaultDayLog(),
             dayLogHistory: activeProfile.dayLogHistory ?? [],
+            customDateLogs: activeProfile.customDateLogs ?? [],
+            dateRangeLogs: activeProfile.dateRangeLogs ?? [],
             cycleLogs: activeProfile.cycleLogs ?? {},
+            scheduledDailyPlans: activeProfile.scheduledDailyPlans ?? {},
           }
         : undefined;
 
-    const { token, account } = await registerAccount(
+    const { token, syncKey, account } = await registerAccount(
       username,
       password,
       starterCards,
@@ -1105,82 +1322,73 @@ export default function App() {
       starterChecklistTables,
       starterDaySync
     );
-    if (token) setAuthToken(token);
-    lastCloudUpdatedAtRef.current = account.updatedAt;
-    suppressNextCloudPushRef.current = true;
-
-    const cloudProfile: UserProfile = {
-      id: account.id,
-      name: account.username,
-      createdAt: account.createdAt,
-      studyCards: account.studyCards,
-      goals: account.goals ?? [],
-      checklistTables: account.checklistTables ?? [],
-      activeDayLog: account.activeDayLog ?? createDefaultDayLog(),
-      dayLogHistory: account.dayLogHistory ?? [],
-      cycleLogs: account.cycleLogs ?? {},
-      activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
-      dailyHistory: account.dailyHistory ?? [],
-      gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
-      isCloudAccount: true,
-    };
-    setProfiles((prev) => [
-      cloudProfile,
-      ...prev.filter((p) => !p.isCloudAccount && p.id !== account.id),
-    ]);
-    setActiveProfileId(account.id);
-    setActiveCardId(null);
-    focusEndAtRef.current = null;
-    breakEndAtRef.current = null;
-    nextAlertAtRef.current = null;
-    saveTimerSnapshot(null);
-    setActiveView(initialInviteRef.current ? 'workspace' : 'hub');
-    setIsFocusRunning(false);
-    setIsBreakRunning(false);
-    setIsCheckInRunning(false);
-    setElapsedSessionSeconds(0);
-    setActiveAlertBanner(null);
-    setCompanionCaption(`Hey ${account.username} — your account is ready and synced.`);
+    applySignedInAccount(
+      token,
+      account,
+      `Hey ${account.username} — your account is ready and synced.`
+    );
+    return { syncKey };
   };
 
   const handleLoginCloudAccount = async (username: string, password: string) => {
     const { token, account } = await loginAccount(username, password);
-    if (token) setAuthToken(token);
-    lastCloudUpdatedAtRef.current = account.updatedAt;
-    suppressNextCloudPushRef.current = true;
+    applySignedInAccount(
+      token,
+      account,
+      `Welcome back, ${account.username} — loaded ${account.studyCards.length} cards.`
+    );
+  };
 
-    const cloudProfile: UserProfile = {
-      id: account.id,
-      name: account.username,
-      createdAt: account.createdAt,
-      studyCards: account.studyCards,
-      goals: account.goals ?? [],
-      checklistTables: account.checklistTables ?? [],
-      activeDayLog: account.activeDayLog ?? createDefaultDayLog(),
-      dayLogHistory: account.dayLogHistory ?? [],
-      cycleLogs: account.cycleLogs ?? {},
-      activeDailyPlan: account.activeDailyPlan ?? createDefaultDailyPlan(),
-      dailyHistory: account.dailyHistory ?? [],
-      gamification: account.gamification ?? DEFAULT_GAMIFICATION_STATS,
-      isCloudAccount: true,
-    };
-    setProfiles((prev) => [
-      cloudProfile,
-      ...prev.filter((p) => !p.isCloudAccount && p.id !== account.id),
-    ]);
-    setActiveProfileId(account.id);
-    setActiveCardId(null);
-    focusEndAtRef.current = null;
-    breakEndAtRef.current = null;
-    nextAlertAtRef.current = null;
-    saveTimerSnapshot(null);
-    setActiveView(initialInviteRef.current ? 'workspace' : 'hub');
-    setIsFocusRunning(false);
-    setIsBreakRunning(false);
-    setIsCheckInRunning(false);
-    setElapsedSessionSeconds(0);
-    setActiveAlertBanner(null);
-    setCompanionCaption(`Welcome back, ${account.username} — loaded ${account.studyCards.length} cards.`);
+  const handleLoginWithSyncKey = async (username: string, syncKey: string) => {
+    const { token, account } = await loginWithSyncKey(username, syncKey);
+    applySignedInAccount(
+      token,
+      account,
+      `Welcome back, ${account.username} — synced ${account.studyCards.length} cards.`
+    );
+  };
+
+  const handleLoginWithPairCode = async (username: string, pairCode: string) => {
+    const { token, account } = await loginWithPairCode(username, pairCode);
+    applySignedInAccount(
+      token,
+      account,
+      `Device paired! Welcome back, ${account.username}.`
+    );
+  };
+
+  const handleRequestPairCode = async () => {
+    if (!authToken) {
+      throw new Error('Sign in with your Sync Key or password first to link a new device.');
+    }
+    return requestDevicePairCode(authToken);
+  };
+
+  const handleRotateSyncKey = async () => {
+    if (!authToken) {
+      throw new Error('Sign in first to generate a new Sync Key.');
+    }
+    return rotateAccountSyncKey(authToken);
+  };
+
+  const handleRecoverLegacyDevice = async (
+    username: string,
+    accountId: string
+  ): Promise<{ syncKey?: string }> => {
+    const res = await recoverLegacyDeviceAccount(username, accountId);
+    applySignedInAccount(
+      res.token,
+      res.account,
+      `Welcome back, ${res.account.username} — your account is reconnected and synced.`
+    );
+    return { syncKey: res.syncKey };
+  };
+
+  const handleSyncLocalProfileNow = async (): Promise<{ syncKey?: string }> => {
+    if (!activeProfile || activeProfile.isCloudAccount) {
+      throw new Error('This profile is already synced to the cloud.');
+    }
+    return handleRegisterCloudAccount(activeProfile.name);
   };
 
   const handleSignOutCloudAccount = async () => {
@@ -1197,10 +1405,14 @@ export default function App() {
         {
           activeDayLog: activeProfile.activeDayLog,
           dayLogHistory: activeProfile.dayLogHistory ?? [],
+          customDateLogs: activeProfile.customDateLogs ?? [],
+          dateRangeLogs: activeProfile.dateRangeLogs ?? [],
           cycleLogs: activeProfile.cycleLogs ?? {},
+          scheduledDailyPlans: activeProfile.scheduledDailyPlans ?? {},
         }
       );
     }
+    await logoutAccount(authToken);
     setAuthToken(null);
     hasUnsyncedCloudRef.current = false;
     focusEndAtRef.current = null;
@@ -2186,18 +2398,115 @@ export default function App() {
     }));
   };
 
-  // Playlist & Trim handlers scoped to active Study Card
+  // Multi-playlist & per-playlist trim handlers scoped to active Study Card
+  const withUpdatedPlaylists = useCallback(
+    (
+      card: StudySessionCard,
+      updater: (
+        groups: VideoPlaylistGroup[],
+        activeId: string
+      ) => { groups: VideoPlaylistGroup[]; activeId: string }
+    ): StudySessionCard => {
+      const existingGroups: VideoPlaylistGroup[] =
+        card.playlists && card.playlists.length > 0
+          ? card.playlists
+          : [
+              {
+                id: `pl-${card.id}`,
+                title: 'Main Playlist',
+                items: card.playlist ?? [],
+                activeVideoId: card.activeVideoId ?? null,
+                trimIntroSeconds: card.videoTrimIntroSeconds ?? 0,
+                trimOutroSeconds: card.videoTrimOutroSeconds ?? 0,
+                createdAt: card.createdAt,
+              },
+            ];
+      const curActiveId =
+        existingGroups.find((g) => g.id === card.activePlaylistId)?.id ??
+        existingGroups[0].id;
+      const { groups, activeId } = updater(existingGroups, curActiveId);
+      const nextActive = groups.find((g) => g.id === activeId) ?? groups[0];
+      return {
+        ...card,
+        playlists: groups,
+        activePlaylistId: nextActive?.id,
+        playlist: nextActive?.items ?? [],
+        activeVideoId: nextActive?.activeVideoId ?? null,
+        videoTrimIntroSeconds: nextActive?.trimIntroSeconds ?? 0,
+        videoTrimOutroSeconds: nextActive?.trimOutroSeconds ?? 0,
+      };
+    },
+    []
+  );
+
+  const handleSelectPlaylist = (playlistId: string) => {
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups) => ({
+        groups,
+        activeId: groups.some((g) => g.id === playlistId) ? playlistId : groups[0].id,
+      }))
+    );
+  };
+
+  const handleCreatePlaylist = (title: string) => {
+    const cleanTitle = title.trim() || `Playlist ${cardPlaylists.length + 1}`;
+    const newGroup: VideoPlaylistGroup = {
+      id: makeId('pl'),
+      title: cleanTitle,
+      items: [],
+      activeVideoId: null,
+      trimIntroSeconds: 0,
+      trimOutroSeconds: 0,
+      createdAt: Date.now(),
+    };
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups) => ({
+        groups: [...groups, newGroup],
+        activeId: newGroup.id,
+      }))
+    );
+  };
+
+  const handleRenamePlaylist = (playlistId: string, title: string) => {
+    const cleanTitle = title.trim();
+    if (!cleanTitle) return;
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups, activeId) => ({
+        groups: groups.map((g) => (g.id === playlistId ? { ...g, title: cleanTitle } : g)),
+        activeId,
+      }))
+    );
+  };
+
+  const handleDeletePlaylist = (playlistId: string) => {
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups, activeId) => {
+        if (groups.length <= 1) return { groups, activeId };
+        const filtered = groups.filter((g) => g.id !== playlistId);
+        return {
+          groups: filtered,
+          activeId: activeId === playlistId ? filtered[0].id : activeId,
+        };
+      })
+    );
+  };
+
   const handleAddVideo = (item: Omit<PlaylistItem, 'id' | 'addedAt'>) => {
     const nextItem: PlaylistItem = {
       ...item,
       id: makeId('vid'),
       addedAt: Date.now(),
     };
-    updateActiveCard((c) => ({
-      ...c,
-      playlist: [...c.playlist, nextItem],
-      activeVideoId: nextItem.id,
-    }));
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups, activeId) => ({
+        groups: groups.map((g) =>
+          g.id === activeId
+            ? { ...g, items: [...g.items, nextItem], activeVideoId: nextItem.id }
+            : g
+        ),
+        activeId,
+      }))
+    );
   };
 
   const handleAddPlaylistBatch = (items: Array<Omit<PlaylistItem, 'id' | 'addedAt'>>) => {
@@ -2208,52 +2517,81 @@ export default function App() {
       id: `${makeId('vid')}-${idx}`,
       addedAt: baseTime + idx,
     }));
-    updateActiveCard((c) => ({
-      ...c,
-      playlist: [...c.playlist, ...created],
-      activeVideoId: created[0].id,
-    }));
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups, activeId) => ({
+        groups: groups.map((g) =>
+          g.id === activeId
+            ? { ...g, items: [...g.items, ...created], activeVideoId: created[0].id }
+            : g
+        ),
+        activeId,
+      }))
+    );
   };
 
   const handleUpdateTrimSettings = (introSec: number, outroSec: number) => {
-    updateActiveCard((c) => ({
-      ...c,
-      videoTrimIntroSeconds: Math.max(0, Math.round(introSec)),
-      videoTrimOutroSeconds: Math.max(0, Math.round(outroSec)),
-    }));
+    const nextIntro = Math.max(0, Math.round(introSec));
+    const nextOutro = Math.max(0, Math.round(outroSec));
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups, activeId) => ({
+        groups: groups.map((g) =>
+          g.id === activeId
+            ? { ...g, trimIntroSeconds: nextIntro, trimOutroSeconds: nextOutro }
+            : g
+        ),
+        activeId,
+      }))
+    );
   };
 
   const handleSelectVideo = (videoId: string) => {
-    updateActiveCard((c) => ({ ...c, activeVideoId: videoId }));
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups, activeId) => ({
+        groups: groups.map((g) => (g.id === activeId ? { ...g, activeVideoId: videoId } : g)),
+        activeId,
+      }))
+    );
   };
 
   const handleRemoveVideo = (videoId: string) => {
-    updateActiveCard((c) => {
-      const next = c.playlist.filter((v) => v.id !== videoId);
-      return {
-        ...c,
-        playlist: next,
-        activeVideoId:
-          c.activeVideoId === videoId ? (next[0]?.id ?? null) : c.activeVideoId,
-      };
-    });
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups, activeId) => ({
+        groups: groups.map((g) => {
+          if (g.id !== activeId) return g;
+          const next = g.items.filter((v) => v.id !== videoId);
+          return {
+            ...g,
+            items: next,
+            activeVideoId:
+              g.activeVideoId === videoId ? (next[0]?.id ?? null) : g.activeVideoId,
+          };
+        }),
+        activeId,
+      }))
+    );
   };
 
   const handleReorderVideo = (fromIndex: number, toIndex: number) => {
-    updateActiveCard((c) => {
-      if (
-        fromIndex < 0 ||
-        toIndex < 0 ||
-        fromIndex >= c.playlist.length ||
-        toIndex >= c.playlist.length
-      ) {
-        return c;
-      }
-      const copy = [...c.playlist];
-      const [moved] = copy.splice(fromIndex, 1);
-      copy.splice(toIndex, 0, moved);
-      return { ...c, playlist: copy };
-    });
+    updateActiveCard((c) =>
+      withUpdatedPlaylists(c, (groups, activeId) => ({
+        groups: groups.map((g) => {
+          if (
+            g.id !== activeId ||
+            fromIndex < 0 ||
+            toIndex < 0 ||
+            fromIndex >= g.items.length ||
+            toIndex >= g.items.length
+          ) {
+            return g;
+          }
+          const copy = [...g.items];
+          const [moved] = copy.splice(fromIndex, 1);
+          copy.splice(toIndex, 0, moved);
+          return { ...g, items: copy };
+        }),
+        activeId,
+      }))
+    );
   };
 
   const handleUpdateTimerSettings = (next: TimerSettings) => {
@@ -2415,6 +2753,16 @@ export default function App() {
     [updateActiveProfile]
   );
 
+  const handleUpdateScheduledDailyPlans = useCallback(
+    (updater: (prev: Record<string, DailyPlanRecord>) => Record<string, DailyPlanRecord>) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        scheduledDailyPlans: updater(profile.scheduledDailyPlans ?? {}),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
   const handleUpdateGamification = useCallback(
     (updater: (prev: GamificationStats) => GamificationStats) => {
       updateActiveProfile((profile) => ({
@@ -2430,6 +2778,26 @@ export default function App() {
       updateActiveProfile((profile) => ({
         ...profile,
         activeDayLog: updater(profile.activeDayLog ?? createDefaultDayLog()),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
+  const handleUpdateCustomDateLogs = useCallback(
+    (updater: (prev: CustomDateLogSheet[]) => CustomDateLogSheet[]) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        customDateLogs: updater(profile.customDateLogs ?? []),
+      }));
+    },
+    [updateActiveProfile]
+  );
+
+  const handleUpdateDateRangeLogs = useCallback(
+    (updater: (prev: DateRangeLogSheet[]) => DateRangeLogSheet[]) => {
+      updateActiveProfile((profile) => ({
+        ...profile,
+        dateRangeLogs: updater(profile.dateRangeLogs ?? []),
       }));
     },
     [updateActiveProfile]
@@ -2570,6 +2938,8 @@ export default function App() {
       const target = list.find((e) => e.id === entryId);
       if (!target || !target.text.trim()) return;
       const wasDone = target.status === 'done';
+      const nextStatus = wasDone ? 'pending' : 'done';
+      const completedAt = wasDone ? undefined : Date.now();
 
       handleUpdateDailyPlan((prev) => {
         const listKey = kind === 'priority' ? 'priorities' : 'todos';
@@ -2580,14 +2950,43 @@ export default function App() {
             item.id === entryId
               ? {
                   ...item,
-                  status: wasDone ? 'pending' : 'done',
-                  completedAt: wasDone ? undefined : Date.now(),
+                  status: nextStatus,
+                  completedAt,
                   missedAt: undefined,
                 }
               : item
           ),
         };
       });
+
+      const syncedIds = activeDailyPlan.syncedGoalIds ?? [];
+      if (activeDailyPlan.autoSyncGoals !== false && syncedIds.length > 0 && target.syncKey) {
+        const listKey = kind === 'priority' ? 'priorities' : 'todos';
+        handleUpdateGoals((prevGoals) =>
+          prevGoals.map((goal) => {
+            if (!syncedIds.includes(goal.id)) return goal;
+            const stepIdx = resolveMatchingStepIndexForDate(goal, activeDailyPlan.dateKey);
+            if (stepIdx === -1) return goal;
+            return {
+              ...goal,
+              updatedAt: Date.now(),
+              steps: goal.steps.map((step, sIdx) => {
+                if (sIdx !== stepIdx) return step;
+                return {
+                  ...step,
+                  [listKey]: (step[listKey] ?? []).map((item) =>
+                    item.syncKey === target.syncKey ||
+                    `goal:${goal.id}:s${step.stepNumber}:${kind === 'priority' ? 'pri' : 'todo'}:${item.id}` ===
+                      target.syncKey
+                      ? { ...item, status: nextStatus, completedAt, missedAt: undefined }
+                      : item
+                  ),
+                };
+              }),
+            };
+          })
+        );
+      }
 
       if (!wasDone) {
         handleUpdateGamification((prev) => {
@@ -2597,24 +2996,77 @@ export default function App() {
         });
       }
     },
-    [activeDailyPlan.priorities, activeDailyPlan.todos, handleUpdateDailyPlan, handleUpdateGamification]
+    [
+      activeDailyPlan.autoSyncGoals,
+      activeDailyPlan.dateKey,
+      activeDailyPlan.priorities,
+      activeDailyPlan.syncedGoalIds,
+      activeDailyPlan.todos,
+      handleUpdateDailyPlan,
+      handleUpdateGamification,
+      handleUpdateGoals,
+    ]
   );
 
   const handleWidgetMissDailyEntry = useCallback(
     (kind: 'priority' | 'todo', entryId: string) => {
+      const list = kind === 'priority' ? activeDailyPlan.priorities : activeDailyPlan.todos;
+      const target = list.find((e) => e.id === entryId);
+      const missedAt = Date.now();
       handleUpdateDailyPlan((prev) => {
         const listKey = kind === 'priority' ? 'priorities' : 'todos';
         return {
           ...prev,
-          updatedAt: Date.now(),
+          updatedAt: missedAt,
           [listKey]: prev[listKey].map((item) =>
-            item.id === entryId ? { ...item, status: 'missed', missedAt: Date.now() } : item
+            item.id === entryId ? { ...item, status: 'missed', missedAt } : item
           ),
         };
       });
+
+      const syncedIds = activeDailyPlan.syncedGoalIds ?? [];
+      if (
+        target?.syncKey &&
+        activeDailyPlan.autoSyncGoals !== false &&
+        syncedIds.length > 0
+      ) {
+        const listKey = kind === 'priority' ? 'priorities' : 'todos';
+        handleUpdateGoals((prevGoals) =>
+          prevGoals.map((goal) => {
+            if (!syncedIds.includes(goal.id)) return goal;
+            const stepIdx = resolveMatchingStepIndexForDate(goal, activeDailyPlan.dateKey);
+            if (stepIdx === -1) return goal;
+            return {
+              ...goal,
+              updatedAt: missedAt,
+              steps: goal.steps.map((step, sIdx) => {
+                if (sIdx !== stepIdx) return step;
+                return {
+                  ...step,
+                  [listKey]: (step[listKey] ?? []).map((item) =>
+                    item.syncKey === target.syncKey ||
+                    `goal:${goal.id}:s${step.stepNumber}:${kind === 'priority' ? 'pri' : 'todo'}:${item.id}` ===
+                      target.syncKey
+                      ? { ...item, status: 'missed', missedAt }
+                      : item
+                  ),
+                };
+              }),
+            };
+          })
+        );
+      }
       playCueSound('goal_carryover');
     },
-    [handleUpdateDailyPlan]
+    [
+      activeDailyPlan.autoSyncGoals,
+      activeDailyPlan.dateKey,
+      activeDailyPlan.priorities,
+      activeDailyPlan.syncedGoalIds,
+      activeDailyPlan.todos,
+      handleUpdateDailyPlan,
+      handleUpdateGoals,
+    ]
   );
 
   const activeSprintPhase: SprintPhase = isBreakRunning ? 'break' : 'work';
@@ -2660,45 +3112,145 @@ export default function App() {
           onJoinFriendRoom={handleJoinRoomInput}
         />
       ) : activeView === 'workspace' && activeCard ? (
-        <main className="relative z-10 mx-auto grid w-full max-w-[1440px] flex-1 min-h-0 grid-cols-1 gap-3.5 px-4 py-3 sm:px-6 lg:grid-cols-12 lg:px-8">
-          {/* Left Column: Realistic Sora Voice + Generous Full-Face Camera / Friend Co-Study */}
-          <div className="flex min-h-0 flex-col gap-3 lg:col-span-5 xl:col-span-4">
-            <CompanionStage
-              pose={pose}
-              caption={companionCaption}
-              isSimulatingSpeech={isSimulatingSpeech}
-              liveStatus={liveVoice.status}
-              liveMuted={liveVoice.isMuted}
-              isAssistantSpeaking={liveVoice.isAssistantSpeaking}
-              audioLevel={liveVoice.audioLevel}
-              outputLevel={liveVoice.outputLevel}
-              liveError={liveVoice.errorMessage}
-              liveDraftUserText={liveDraftUserText}
-              liveDraftAssistantText={liveDraftAssistantText}
-              onStartVoice={liveVoice.startVoice}
-              onStopVoice={liveVoice.stopVoice}
-              onReconnectVoice={liveVoice.reconnectLive}
-              onToggleLiveMute={liveVoice.toggleMute}
-            />
+        <main
+          ref={workspaceContainerRef}
+          className="relative z-10 mx-auto flex w-full max-w-[1440px] flex-1 min-h-0 flex-col gap-3 px-3 py-2.5 sm:px-6 lg:flex-row lg:gap-0 lg:px-8 lg:py-3"
+        >
+          {/* Left Column: Realistic Sora Voice + Full-Face Camera (stays mounted offscreen when collapsed so streams/voice keep running) */}
+          <div
+            aria-hidden={isMediaPaneCollapsed}
+            className={
+              isMediaPaneCollapsed
+                ? 'fixed -left-[9999px] top-0 h-px w-px overflow-hidden opacity-0 pointer-events-none'
+                : `flex shrink-0 min-h-0 flex-col gap-2.5 w-full ${
+                    mediaPanePct <= 20
+                      ? 'lg:w-[20%]'
+                      : mediaPanePct <= 24
+                        ? 'lg:w-[24%]'
+                        : mediaPanePct <= 28
+                          ? 'lg:w-[28%]'
+                          : mediaPanePct <= 32
+                            ? 'lg:w-[32%]'
+                            : mediaPanePct <= 36
+                              ? 'lg:w-[36%]'
+                              : mediaPanePct <= 40
+                                ? 'lg:w-[40%]'
+                                : mediaPanePct <= 44
+                                  ? 'lg:w-[44%]'
+                                  : 'lg:w-[48%]'
+                  }`
+            }
+          >
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-cyan-200/10 bg-[#08121e]/75 px-2.5 py-1 text-[11px] text-slate-300">
+              <span className="flex items-center gap-1.5 font-medium text-cyan-200">
+                <Sparkles className="h-3 w-3 text-cyan-300" />
+                Sora AI &amp; Camera
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsMediaPaneCollapsed(true)}
+                title="Hide Sora & Camera visually while keeping AI voice and camera running in background"
+                className="flex cursor-pointer items-center gap-1 rounded-md border border-cyan-200/15 bg-cyan-400/[0.06] px-2 py-0.5 text-[10px] font-medium text-slate-200 transition-colors hover:border-cyan-300/40 hover:text-cyan-100"
+              >
+                <Minimize2 className="h-3 w-3" />
+                Run in Background
+              </button>
+            </div>
 
-            <CoStudyRoomPanel
-              roomId={roomId}
-              shareUrl={shareUrl}
-              roomStatus={studyRoom.status}
-              remoteParticipants={studyRoom.remoteParticipants}
-              remoteStream={studyRoom.remoteStream}
-              onCreateAndCopyInvite={handleCreateAndCopyInvite}
-              onJoinRoomInput={handleJoinRoomInput}
-              onLeaveRoom={handleLeaveRoom}
-              onCameraStreamChange={studyRoom.attachLocalCamera}
-              onRecordingSaved={(clip) =>
-                saveLogEntry(activeSprintPhase, clip.durationSeconds, clip)
-              }
-            />
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:flex lg:min-h-0 lg:flex-1 lg:flex-col lg:gap-3">
+              <CompanionStage
+                pose={pose}
+                caption={companionCaption}
+                isSimulatingSpeech={isSimulatingSpeech}
+                liveStatus={liveVoice.status}
+                liveMuted={liveVoice.isMuted}
+                isAssistantSpeaking={liveVoice.isAssistantSpeaking}
+                audioLevel={liveVoice.audioLevel}
+                outputLevel={liveVoice.outputLevel}
+                liveError={liveVoice.errorMessage}
+                liveDraftUserText={liveDraftUserText}
+                liveDraftAssistantText={liveDraftAssistantText}
+                onStartVoice={liveVoice.startVoice}
+                onStopVoice={liveVoice.stopVoice}
+                onReconnectVoice={liveVoice.reconnectLive}
+                onToggleLiveMute={liveVoice.toggleMute}
+                compact={mediaPanePct <= 24}
+              />
+
+              <CoStudyRoomPanel
+                roomId={roomId}
+                shareUrl={shareUrl}
+                roomStatus={studyRoom.status}
+                remoteParticipants={studyRoom.remoteParticipants}
+                remoteStream={studyRoom.remoteStream}
+                onCreateAndCopyInvite={handleCreateAndCopyInvite}
+                onJoinRoomInput={handleJoinRoomInput}
+                onLeaveRoom={handleLeaveRoom}
+                onCameraStreamChange={studyRoom.attachLocalCamera}
+                onRecordingSaved={(clip) =>
+                  saveLogEntry(activeSprintPhase, clip.durationSeconds, clip)
+                }
+                compact={mediaPanePct <= 24}
+              />
+            </div>
           </div>
 
-          {/* Right Column: Mode Switch + 3 Separate Timers (Focus | Break | Check-in) + Workspace */}
-          <div className="flex min-h-0 flex-col gap-3 lg:col-span-7 xl:col-span-8">
+          {/* Desktop Resizable Drag Divider */}
+          {!isMediaPaneCollapsed && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Drag to resize Sora AI and Camera width (double-click to reset)"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                isDraggingDividerRef.current = true;
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+              }}
+              onDoubleClick={() => {
+                setMediaPanePct(36);
+                try {
+                  localStorage.setItem('focuspair.mediaPanePct.v1', '36');
+                } catch {
+                  // Ignore storage write errors
+                }
+              }}
+              title="Drag to resize · Drag left to collapse into background · Double-click to reset"
+              className="hidden lg:flex w-3 shrink-0 cursor-col-resize items-center justify-center group"
+            >
+              <div className="flex h-16 w-1.5 items-center justify-center rounded-full bg-cyan-200/10 transition-colors group-hover:bg-cyan-300/45">
+                <GripVertical className="h-3.5 w-3.5 text-cyan-300/60 group-hover:text-cyan-200" />
+              </div>
+            </div>
+          )}
+
+          {/* Right Column: Mode Switch + 3 Separate Timers + Expanded Workspace */}
+          <div className="flex min-w-0 flex-1 min-h-0 flex-col gap-3">
+            {isMediaPaneCollapsed && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-cyan-300/25 bg-cyan-500/[0.08] px-3 py-1.5 text-xs text-cyan-100">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]" />
+                  <Video className="h-3.5 w-3.5 text-cyan-300" />
+                  <span className="font-medium">
+                    Sora AI &amp; Camera active in background
+                  </span>
+                  {liveVoice.status === 'live' && (
+                    <span className="rounded bg-cyan-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-200">
+                      Voice Live
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsMediaPaneCollapsed(false)}
+                  className="flex cursor-pointer items-center gap-1 rounded-md border border-cyan-300/40 bg-cyan-400/20 px-2.5 py-1 text-[11px] font-semibold text-cyan-50 transition-colors hover:bg-cyan-400/30"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Show AI &amp; Camera
+                </button>
+              </div>
+            )}
+
             <SessionTimerBar
               panelMode={panelMode}
               onChangePanelMode={setPanelMode}
@@ -2768,13 +3320,19 @@ export default function App() {
               />
             ) : (
               <VideoPlaylistPanel
-                playlist={playlist}
-                activeVideoId={activeCard.activeVideoId}
-                trimIntroSeconds={activeCard.videoTrimIntroSeconds ?? 0}
-                trimOutroSeconds={activeCard.videoTrimOutroSeconds ?? 0}
+                playlists={cardPlaylists}
+                activePlaylistId={activePlaylistGroup?.id ?? null}
+                playlist={activePlaylistGroup?.items ?? []}
+                activeVideoId={activePlaylistGroup?.activeVideoId ?? null}
+                trimIntroSeconds={activePlaylistGroup?.trimIntroSeconds ?? 0}
+                trimOutroSeconds={activePlaylistGroup?.trimOutroSeconds ?? 0}
                 inSharedRoom={Boolean(roomId)}
                 watchTogether={watchTogether}
                 remoteVideoState={studyRoom.sharedVideoState}
+                onSelectPlaylist={handleSelectPlaylist}
+                onCreatePlaylist={handleCreatePlaylist}
+                onRenamePlaylist={handleRenamePlaylist}
+                onDeletePlaylist={handleDeletePlaylist}
                 onToggleWatchTogether={() => setWatchTogether((w) => !w)}
                 onSelectVideo={handleSelectVideo}
                 onAddVideo={handleAddVideo}
@@ -2793,11 +3351,13 @@ export default function App() {
           goals={goals}
           activeDailyPlan={activeDailyPlan}
           dailyHistory={dailyHistory}
+          scheduledDailyPlans={scheduledDailyPlans}
           gamification={gamification}
           cycleLogs={cycleLogs}
           onUpdateGoals={handleUpdateGoals}
           onUpdateDailyPlan={handleUpdateDailyPlan}
           onUpdateDailyHistory={handleUpdateDailyHistory}
+          onUpdateScheduledDailyPlans={handleUpdateScheduledDailyPlans}
           onUpdateGamification={handleUpdateGamification}
           onUpdateCycleLog={handleUpdateCycleLog}
           onOpenDayLogTab={() => setActiveView('daylog')}
@@ -2818,9 +3378,13 @@ export default function App() {
         <DayLogView
           activeDayLog={activeDayLog}
           dayLogHistory={dayLogHistory}
+          customDateLogs={customDateLogs}
+          dateRangeLogs={dateRangeLogs}
           goals={goals}
           cycleLogs={cycleLogs}
           onUpdateActiveDayLog={handleUpdateActiveDayLog}
+          onUpdateCustomDateLogs={handleUpdateCustomDateLogs}
+          onUpdateDateRangeLogs={handleUpdateDateRangeLogs}
           onArchiveDayLog={handleArchiveDayLog}
           onUpdateCycleLog={handleUpdateCycleLog}
           onQuickStartPeriodGoal={handleQuickStartPeriodGoal}
@@ -2865,10 +3429,17 @@ export default function App() {
         activeProfile={activeProfile}
         isCloudSignedIn={Boolean(authToken && activeProfile?.isCloudAccount)}
         isSyncing={isSyncingAccount}
+        cloudNeedsReconnect={Boolean(activeProfile?.isCloudAccount && !authToken)}
         onClose={() => setIsProfileModalOpen(false)}
         onRegisterCloudAccount={handleRegisterCloudAccount}
         onLoginCloudAccount={handleLoginCloudAccount}
+        onLoginWithSyncKey={handleLoginWithSyncKey}
+        onLoginWithPairCode={handleLoginWithPairCode}
+        onRequestPairCode={handleRequestPairCode}
+        onRotateSyncKey={handleRotateSyncKey}
         onSignOutCloudAccount={handleSignOutCloudAccount}
+        onRecoverLegacyDevice={handleRecoverLegacyDevice}
+        onSyncLocalProfileNow={handleSyncLocalProfileNow}
         onSelectLocalProfile={handleSelectProfile}
         onDeleteLocalProfile={handleDeleteProfile}
         onImportCardsBackup={handleImportCardsBackup}

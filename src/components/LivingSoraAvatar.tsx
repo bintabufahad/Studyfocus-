@@ -8,6 +8,7 @@ interface LivingSoraAvatarProps {
   speechLevel: number;
   isListening?: boolean;
   caption?: string;
+  compact?: boolean;
 }
 
 export function LivingSoraAvatar({
@@ -16,6 +17,7 @@ export function LivingSoraAvatar({
   speechLevel,
   isListening = false,
   caption,
+  compact = false,
 }: LivingSoraAvatarProps) {
   const [isBlinking, setIsBlinking] = useState(false);
   const [glancingAtUser, setGlancingAtUser] = useState(false);
@@ -117,7 +119,13 @@ export function LivingSoraAvatar({
   const mouthHalfW = 10.2 - effectiveOpen * 1.8;
 
   return (
-    <div className="relative aspect-[16/9] max-h-[170px] w-full overflow-hidden bg-[#040711] lg:max-h-[198px]">
+    <div
+      className={`relative aspect-[16/9] w-full overflow-hidden bg-[#040711] ${
+        compact
+          ? 'max-h-[115px] sm:max-h-[135px] lg:max-h-[150px]'
+          : 'max-h-[135px] sm:max-h-[150px] lg:max-h-[195px]'
+      }`}
+    >
       <svg
         viewBox="0 0 640 360"
         className="h-full w-full select-none object-cover"

@@ -19,6 +19,7 @@ interface CompanionStageProps {
   onStopVoice: () => void;
   onReconnectVoice: () => void;
   onToggleLiveMute: () => void;
+  compact?: boolean;
 }
 
 export function CompanionStage({
@@ -37,6 +38,7 @@ export function CompanionStage({
   onStopVoice,
   onReconnectVoice,
   onToggleLiveMute,
+  compact = false,
 }: CompanionStageProps) {
   const isSpeakingNow = isAssistantSpeaking || isSimulatingSpeech;
   const speechAmplitude = isAssistantSpeaking ? outputLevel : audioLevel;
@@ -57,6 +59,7 @@ export function CompanionStage({
         speechLevel={speechAmplitude}
         isListening={liveStatus === 'live' && !liveMuted && !isAssistantSpeaking}
         caption={displayCaption}
+        compact={compact}
       />
 
       {/* Single-Row Live Voice Companion Controls (Chat box & check-in chips removed to maximize camera) */}

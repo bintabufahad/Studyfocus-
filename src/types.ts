@@ -84,6 +84,16 @@ export interface TimerSettings {
   visualCuesEnabled: boolean;
 }
 
+export interface VideoPlaylistGroup {
+  id: string;
+  title: string;
+  items: PlaylistItem[];
+  activeVideoId: string | null;
+  trimIntroSeconds: number;
+  trimOutroSeconds: number;
+  createdAt: number;
+}
+
 export interface StudySessionCard {
   id: string;
   title: string;
@@ -95,6 +105,8 @@ export interface StudySessionCard {
   activeVideoId: string | null;
   videoTrimIntroSeconds?: number;
   videoTrimOutroSeconds?: number;
+  playlists?: VideoPlaylistGroup[];
+  activePlaylistId?: string | null;
   timerSettings: TimerSettings;
   sessionLogs: SessionLog[];
 }
@@ -125,6 +137,7 @@ export interface GoalTaskEntry {
   deadline?: PriorityDeadline;
   completedAt?: number;
   missedAt?: number;
+  syncKey?: string;
 }
 
 export interface DailyPlanRecord {
@@ -132,6 +145,8 @@ export interface DailyPlanRecord {
   priorities: GoalTaskEntry[];
   todos: GoalTaskEntry[];
   dismissedImportBanner?: boolean;
+  syncedGoalIds?: string[];
+  autoSyncGoals?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -231,12 +246,59 @@ export interface DayLogStroke {
   points: Array<{ x: number; y: number }>; // virtual 1000x1920 coordinates
 }
 
+export interface DayLogSheetDivision {
+  id: string;
+  label: string;
+  dateKey?: string; // YYYY-MM-DD when representing a specific calendar date
+  completed?: boolean;
+  note?: string;
+}
+
+export interface CustomDateLogSheet {
+  id: string;
+  dateKey: string; // YYYY-MM-DD
+  title: string;
+  divisions: DayLogSheetDivision[];
+  strokes: DayLogStroke[];
+  divisionHeight?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DateRangeLogSheet {
+  id: string;
+  title: string;
+  mode: 'range' | 'month';
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  monthKey: string; // YYYY-MM
+  divisions: DayLogSheetDivision[];
+  strokes: DayLogStroke[];
+  divisionHeight?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DayLogCanvasBlock {
+  id: string;
+  title: string;
+  completed?: boolean;
+  strokes: DayLogStroke[];
+  height?: number;
+  updatedAt: number;
+}
+
 export interface DayLogEntry {
   id: string;
   dateKey: string;
   title?: string;
   strokes: DayLogStroke[];
   hourNotes?: Record<string, string>; // '4'..'27' (4 AM to 3 AM)
+  taskDivisions?: DayLogSheetDivision[];
+  taskStrokes?: DayLogStroke[];
+  taskDivisionHeight?: number;
+  taskBlocks?: DayLogCanvasBlock[];
+  customBlocks?: DayLogCanvasBlock[];
   cycleSummary?: string;
   previewDataUrl?: string;
   createdAt: number;
@@ -268,9 +330,12 @@ export interface UserProfile {
   checklistTables?: ChecklistTableRecord[];
   activeDayLog?: DayLogEntry;
   dayLogHistory?: DayLogEntry[];
+  customDateLogs?: CustomDateLogSheet[];
+  dateRangeLogs?: DateRangeLogSheet[];
   cycleLogs?: Record<string, CycleDayLog>;
   activeDailyPlan?: DailyPlanRecord;
   dailyHistory?: DailyPlanRecord[];
+  scheduledDailyPlans?: Record<string, DailyPlanRecord>;
   gamification?: GamificationStats;
   isCloudAccount?: boolean;
   // Legacy fallback fields kept optional for smooth migration

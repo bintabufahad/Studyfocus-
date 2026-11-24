@@ -1,4 +1,4 @@
-import type { GamificationStats, GoalPhaseKind, GoalPlan } from '../types';
+import type { CycleDayLog, GamificationStats, GoalPhaseKind, GoalPlan, GoalStep } from '../types';
 
 export interface BadgeDef {
   id: string;
@@ -129,11 +129,189 @@ export function computePhaseDayBreakdown(
   };
 }
 
-function diffDaysIso(fromIso: string, toIso: string): number {
+export function addDaysToDateKey(iso: string, offset: number): string {
+  const base = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(base.getTime())) return iso;
+  base.setDate(base.getDate() + offset);
+  const y = base.getFullYear();
+  const m = String(base.getMonth() + 1).padStart(2, '0');
+  const d = String(base.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function diffDaysIso(fromIso: string, toIso: string): number {
   const a = new Date(`${fromIso}T00:00:00`);
   const b = new Date(`${toIso}T00:00:00`);
   if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
   return Math.round((b.getTime() - a.getTime()) / 86_400_000);
+}
+
+export function formatIsoWithWeekday(iso?: string): string | null {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+export function resolveStepDateIso(goal: GoalPlan, step: GoalStep): string | undefined {
+  if (step.dateLabel && /^\d{4}-\d{2}-\d{2}$/.test(step.dateLabel)) {
+    return step.dateLabel;
+  }
+  const phaseAnchor =
+    goal.cadence === 'phase' && goal.phaseConfig?.cycleDates?.length
+      ? [...goal.phaseConfig.cycleDates].sort((a, b) => a.localeCompare(b))[
+          goal.phaseConfig.cycleDates.length - 1
+        ]
+      : undefined;
+  const anchor = goal.steps[0]?.dateLabel || phaseAnchor || goal.startDate;
+  if (anchor && /^\d{4}-\d{2}-\d{2}$/.test(anchor)) {
+    const offset = goal.unit === 'weeks' ? (step.stepNumber - 1) * 7 : step.stepNumber - 1;
+    return addDaysToDateKey(anchor, offset);
+  }
+  const createdDate = new Date(goal.createdAt);
+  if (!Number.isNaN(createdDate.getTime())) {
+    const y = createdDate.getFullYear();
+    const m = String(createdDate.getMonth() + 1).padStart(2, '0');
+    const d = String(createdDate.getDate()).padStart(2, '0');
+    const offset = goal.unit === 'weeks' ? (step.stepNumber - 1) * 7 : step.stepNumber - 1;
+    return addDaysToDateKey(`${y}-${m}-${d}`, offset);
+  }
+  return undefined;
+}
+
+export interface CycleEpisode {
+  startDate: string;
+  endDate: string;
+  lengthDays: number;
+}
+
+export function deriveCycleStatsFromLogs(
+  goal: GoalPlan | null | undefined,
+  cycleLogs: Record<string, CycleDayLog>
+): {
+  hasPreviousData: boolean;
+  detectedCycleDays: number;
+  detectedPeriodDays: number;
+  previousCycleDays: number | null;
+  previousPeriodDays: number | null;
+  episodes: CycleEpisode[];
+  latestPeriodStart: string | null;
+  nextPredictedStart: string | null;
+  phaseBreakdown: ReturnType<typeof computePhaseDayBreakdown>;
+} {
+  const flowDates = Object.values(cycleLogs)
+    .filter(
+      (log) =>
+        log &&
+        /^\d{4}-\d{2}-\d{2}$/.test(log.dateKey) &&
+        (log.flow === 'spotting' ||
+          log.flow === 'light' ||
+          log.flow === 'medium' ||
+          log.flow === 'heavy')
+    )
+    .map((log) => log.dateKey)
+    .sort((a, b) => a.localeCompare(b));
+
+  const endedDates = new Set(
+    Object.values(cycleLogs)
+      .filter((log) => log && log.flow === 'ended')
+      .map((log) => log.dateKey)
+  );
+
+  const episodes: CycleEpisode[] = [];
+  for (const dateKey of flowDates) {
+    const last = episodes[episodes.length - 1];
+    if (!last) {
+      episodes.push({ startDate: dateKey, endDate: dateKey, lengthDays: 1 });
+      continue;
+    }
+    const gap = diffDaysIso(last.endDate, dateKey);
+    const hasExplicitEndBetween = Array.from(endedDates).some(
+      (ed) => ed > last.endDate && ed <= dateKey
+    );
+    if (gap <= 2 && !hasExplicitEndBetween) {
+      last.endDate = dateKey;
+      last.lengthDays = Math.max(1, diffDaysIso(last.startDate, dateKey) + 1);
+    } else {
+      episodes.push({ startDate: dateKey, endDate: dateKey, lengthDays: 1 });
+    }
+  }
+
+  // Merge cycleDates from goal.phaseConfig that aren't already part of an active flow episode
+  const configStarts = [...(goal?.phaseConfig?.cycleDates ?? [])]
+    .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+    .sort((a, b) => a.localeCompare(b));
+
+  const mergedStartDates = [...episodes.map((ep) => ep.startDate)];
+  for (const cs of configStarts) {
+    const closeExisting = mergedStartDates.some((s) => Math.abs(diffDaysIso(s, cs)) < 12);
+    if (!closeExisting) {
+      mergedStartDates.push(cs);
+    }
+  }
+  mergedStartDates.sort((a, b) => a.localeCompare(b));
+
+  const cycleIntervals: number[] = [];
+  for (let i = 1; i < mergedStartDates.length; i++) {
+    const gap = diffDaysIso(mergedStartDates[i - 1], mergedStartDates[i]);
+    if (gap >= 15 && gap <= 60) {
+      cycleIntervals.push(gap);
+    }
+  }
+
+  // If the user explicitly marked menstrual steps inside the goal without logging flow daily, detect count
+  const menstrualStepsCount =
+    goal?.steps.filter((s) => s.phase === 'menstrual').length ?? 0;
+
+  const fallbackCycle = goal?.phaseConfig?.averageCycleDays ?? goal?.steps.length ?? 28;
+  const fallbackPeriod =
+    goal?.phaseConfig?.periodLengthDays ?? (menstrualStepsCount > 0 ? menstrualStepsCount : 6);
+
+  // Previous completed cycle = most recent interval; if 2+ completed episodes, use most recent completed episode's bleed length
+  const previousCycleDays =
+    cycleIntervals.length > 0 ? cycleIntervals[cycleIntervals.length - 1] : null;
+
+  const completedEpisodes =
+    episodes.length >= 2
+      ? episodes.slice(0, -1)
+      : episodes.length === 1 && episodes[0].lengthDays >= 2
+        ? episodes
+        : [];
+  const previousPeriodDays =
+    completedEpisodes.length > 0
+      ? Math.max(1, Math.min(14, completedEpisodes[completedEpisodes.length - 1].lengthDays))
+      : null;
+
+  const detectedCycleDays = Math.max(
+    18,
+    Math.min(45, previousCycleDays ?? fallbackCycle)
+  );
+  const detectedPeriodDays = Math.max(
+    1,
+    Math.min(14, previousPeriodDays ?? fallbackPeriod)
+  );
+
+  const latestPeriodStart =
+    mergedStartDates[mergedStartDates.length - 1] ?? goal?.startDate ?? null;
+  const nextPredictedStart = latestPeriodStart
+    ? addDaysToDateKey(latestPeriodStart, detectedCycleDays)
+    : null;
+
+  return {
+    hasPreviousData: previousCycleDays !== null || previousPeriodDays !== null,
+    detectedCycleDays,
+    detectedPeriodDays,
+    previousCycleDays,
+    previousPeriodDays,
+    episodes,
+    latestPeriodStart,
+    nextPredictedStart,
+    phaseBreakdown: computePhaseDayBreakdown(detectedCycleDays, detectedPeriodDays),
+  };
 }
 
 export function resolveActiveCycleContext(
@@ -154,8 +332,12 @@ export function resolveActiveCycleContext(
   const sortedDates = [...cfg.cycleDates].sort((a, b) => a.localeCompare(b));
   const latestStart = sortedDates[sortedDates.length - 1] ?? phaseGoal.startDate ?? todayIso;
   const total = Math.max(1, phaseGoal.steps.length);
+  const matchedTodayIdx = phaseGoal.steps.findIndex((s) => s.dateLabel === todayIso);
   const elapsed = Math.max(0, diffDaysIso(latestStart, todayIso));
-  const cycleDay = Math.min(total, (elapsed % Math.max(1, cfg.averageCycleDays)) + 1);
+  const cycleDay =
+    matchedTodayIdx !== -1
+      ? matchedTodayIdx + 1
+      : Math.min(total, (elapsed % Math.max(1, cfg.averageCycleDays)) + 1);
   const matchingStep = phaseGoal.steps.find((s) => s.stepNumber === cycleDay);
   const phase =
     matchingStep?.phase ??
